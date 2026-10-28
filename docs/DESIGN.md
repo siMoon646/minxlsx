@@ -122,7 +122,7 @@ The app must never silently destroy a user's file. excelize keeps most workbook 
 
 Round-trip tests are the safety net: every change must keep "open → save → reopen" lossless.
 
-- **Fixture files** in `testdata/`: plain data, formulas, dates, merged cells, styled cells, multiple sheets, a CSV, a file made in Excel, one made in LibreOffice, and one with a chart (to test the warning).
+- **Fixture files** in `testdata/`: plain data, formulas, dates, merged cells, styled cells, multiple sheets, a CSV, real Excel-made files from Apache POI's test suite, one saved by ONLYOFFICE, and one with a chart (to test the warning). A LibreOffice-saved file is optional.
 - **Round-trip tests:** open each fixture, save to a temp path, reopen, and compare every cell value, formula, merge and style.
 - **Model tests:** edits, undo/redo, row/column insert and delete, sheet operations.
 - **UI tests** with Fyne's headless `test` package: typing in a cell, keyboard navigation, the unsaved-changes prompt.
@@ -136,7 +136,7 @@ Seven milestones, each sized for one or two Claude Code sessions and ending with
 2. **Read-only viewer:** open a file, show the grid and sheet tabs, formula bar shows the selected cell
 3. **Editing + save:** edit values, atomic save, Save As, unsaved-changes prompt, round-trip tests on all fixtures
    - Before starting (from the milestone 1 review):
-     - Add the hand-made fixtures `excel.xlsx` (saved by Excel) and `libreoffice.xlsx` (saved by LibreOffice Calc); see `testdata/README.md`.
+     - Excel-made fixtures come from Apache POI's test files (Apache-2.0): `excel-budget`, `excel-shared-formulas`, `excel-hidden-sheet`, `excel-unicode` and `excel-chart` (all `.xlsx`). Also add `onlyoffice.xlsx` (saved by ONLYOFFICE). A LibreOffice-saved file is optional, not required. See `testdata/README.md`.
      - Add a macro fixture (`.xlsm` with a small committed `vbaProject.bin`, via excelize's `AddVBAProject`) so the round-trip tests prove macros survive a save.
      - Add a CSV fixture with CRLF line endings and a UTF-8 BOM, as Excel writes them.
      - Make the styled-cell check compare each border's type, style and colour, not just how many borders there are.
