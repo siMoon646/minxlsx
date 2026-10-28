@@ -30,6 +30,7 @@
       "Bash(mkdir *)"
     ],
     "ask": [
+      "Bash(gh pr merge *)",
       "Bash(go get *)",
       "Bash(go install *)",
       "Bash(git push *)",
