@@ -1,0 +1,11 @@
+# Built executables (go build ./cmd/minxlsx in the repo root, CI's dist/)
+/minxlsx
+/minxlsx.exe
+/dist/
+
+# Portable settings written next to the executable when run from the repo
+/settings/
+
+# Backups and leftover temp files from saves
+*.bak
+*.tmp
