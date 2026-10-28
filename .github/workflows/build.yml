@@ -1,0 +1,115 @@
+# CI for MinXLSX: lint + test + build on Linux and Windows for every push/PR.
+# Pushing a tag like v1.0.0 also publishes both executables to a GitHub Release.
+name: build
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CGO_ENABLED: "1" # Fyne needs cgo (OpenGL)
+
+jobs:
+  check:
+    name: check (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 22.04 on purpose: the binary needs this glibc or newer, so an
+          # older build host means it runs on more Linux distros.
+          - os: ubuntu-22.04
+            bin: minxlsx
+          - os: windows-latest
+            bin: minxlsx.exe
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash # same scripts on both OSes (Git Bash on Windows)
+    steps:
+      - uses: actions/checkout@v4
+
+      # Go version comes from go.mod; module + build cache is keyed on go.sum.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Fyne's C dependencies on Linux.
+      - name: Install Fyne deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc pkg-config libgl1-mesa-dev xorg-dev libxkbcommon-dev libwayland-dev
+
+      # cgo gcc on Windows: MinGW-w64 (UCRT64) from MSYS2, put first on PATH.
+      - name: Install MinGW-w64 gcc (Windows)
+        if: runner.os == 'Windows'
+        id: msys2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          install: mingw-w64-ucrt-x86_64-gcc
+      - name: Add MinGW-w64 to PATH (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: echo "${{ steps.msys2.outputs.msys2-location }}\ucrt64\bin" >> $env:GITHUB_PATH
+      - name: Show gcc
+        run: gcc --version
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "Files need gofmt:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.15.0 # pinned; Go 1.27 support needs v2.13.0+
+
+      - name: go test
+        run: go test ./...
+
+      - name: go build
+        run: go build ./...
+
+      # Build the portable executable (stripped; no console window on Windows).
+      - name: Build ${{ matrix.bin }}
+        run: |
+          ldflags="-s -w"
+          if [ "$RUNNER_OS" = "Windows" ]; then ldflags="$ldflags -H=windowsgui"; fi
+          GOARCH=amd64 go build -trimpath -ldflags "$ldflags" -o "dist/${{ matrix.bin }}" ./cmd/minxlsx
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.bin }}
+          path: dist/${{ matrix.bin }}
+          if-no-files-found: error
+
+  # Only on v* tags: attach both executables to a GitHub Release.
+  release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/minxlsx
+            dist/minxlsx.exe
+          generate_release_notes: true
