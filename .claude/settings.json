@@ -1,6 +1,13 @@
 {
   "permissions": {
     "allow": [
+      "Edit(/cmd/**)",
+      "Edit(/internal/**)",
+      "Edit(/testdata/**)",
+      "Edit(/docs/**)",
+      "Edit(/.github/**)",
+      "Edit(/go.mod)",
+      "Edit(/go.sum)",
       "Bash(go build *)",
       "Bash(go test *)",
       "Bash(go vet *)",
