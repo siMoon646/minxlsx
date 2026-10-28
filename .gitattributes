@@ -3,3 +3,8 @@
 
 # Spreadsheets are zip files: never touch their bytes.
 *.xlsx binary
+*.xlsm binary
+*.bin binary
+
+# CSV fixtures keep their exact line endings (CRLF ones test what Excel writes).
+testdata/*.csv -text
