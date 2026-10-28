@@ -60,9 +60,17 @@ Apache Software Foundation and licensed under the
 | `excel-unicode.xlsx` | `54084 - Greek - beyond BMP.xlsx` | Text outside the Basic Multilingual Plane (Mathematical Greek letters) |
 | `excel-chart.xlsx` | `WithChart.xlsx` | Small table with a chart, three sheets |
 
-### Still to add
+### Saved by ONLYOFFICE
+
+Made by the project author in ONLYOFFICE 9.4 and anonymised (made-up item
+names and amounts).
+
+| File | What it covers |
+| --- | --- |
+| `onlyoffice-bankbook.xlsx` | Five tables with structured references (`SUMIF(Table1[Item],…)`, `SUM(Table2[Income])`), a shared formula using `DATEDIF` and `TODAY()`, merged header cells, dates. ONLYOFFICE writes table `displayName` only, so excelize's `GetTables` returns empty table names. |
+
+### Optional
 
 | File | How to make it |
 | --- | --- |
-| `onlyoffice.xlsx` | Saved by ONLYOFFICE. Include text, numbers, a date, a formula, a merged range, a bold/filled cell and two sheets. Required. |
-| `libreoffice.xlsx` | Saved by LibreOffice Calc as "Excel 2007-365 (.xlsx)", same contents. Optional. |
+| `libreoffice.xlsx` | Saved by LibreOffice Calc as "Excel 2007-365 (.xlsx)". Include text, numbers, a date, a formula, a merged range, a bold/filled cell and two sheets. |

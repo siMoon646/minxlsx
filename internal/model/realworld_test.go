@@ -19,6 +19,7 @@ type realFixture struct {
 	forms  map[string]string // "Sheet!A1" -> formula (without leading '=')
 	merges map[string]string // sheet -> merged ranges that must be present, comma separated
 	names  []string          // defined names that must exist
+	tables []string          // table ranges that must be present, e.g. "A2:C33"
 	chart  bool              // file must contain a chart part
 }
 
@@ -87,6 +88,30 @@ func realFixtures() []realFixture {
 				"Sheet1!A3": "3", "Sheet1!B3": "14",
 			},
 			chart: true,
+		},
+		{
+			name:   "onlyoffice-bankbook.xlsx",
+			sheets: []string{"Sheet1"},
+			cells: map[string]string{
+				"Sheet1!A1": "One-Time-Purchase",
+				"Sheet1!E1": "Ongoing Subscription",
+				"Sheet1!A2": "Item",
+			},
+			// H3 is the master of a shared formula group (H3:H6) that uses
+			// TODAY(); the K and Q cells use structured table references.
+			forms: map[string]string{
+				"Sheet1!H3": `(DATEDIF(G3,TODAY(),"m")+1)*F3`,
+				"Sheet1!H6": `(DATEDIF(G6,TODAY(),"m")+1)*F6`,
+				"Sheet1!K3": `(SUMIF(Table1[Item],"*Retail*",Table1[Cost]))`,
+				"Sheet1!K5": `SUM(Table5[Total])+(SUMIF(Table1[Item],"*Subscription*",Table1[Cost]))`,
+				"Sheet1!Q3": "SUM(Table2[Income])",
+				"Sheet1!Q5": "Q3-Q4",
+			},
+			merges: map[string]string{"Sheet1": "A1:C1,E1:H1,J1:K1,M1:N1,P1:Q1"},
+			// Table1, Table2, Table4, Table5 and Table7. ONLYOFFICE writes only
+			// displayName (no name attribute), and excelize's GetTables reports
+			// name, so the names come back empty; only ranges are checked.
+			tables: []string{"A2:C33", "M2:N8", "J2:K8", "E2:H7", "P2:Q5"},
 		},
 	}
 }
@@ -161,6 +186,24 @@ func TestRealWorldFixtures(t *testing.T) {
 			for _, want := range fx.names {
 				if !slices.Contains(names, want) {
 					t.Errorf("defined names = %q, missing %s", names, want)
+				}
+			}
+			if len(fx.tables) > 0 {
+				var got []string
+				for _, sheet := range fx.sheets {
+					tables, err := f.GetTables(sheet)
+					if err != nil {
+						t.Errorf("%s tables: %v", sheet, err)
+						continue
+					}
+					for _, tb := range tables {
+						got = append(got, strings.ReplaceAll(tb.Range, "$", ""))
+					}
+				}
+				for _, want := range fx.tables {
+					if !slices.Contains(got, want) {
+						t.Errorf("table ranges = %q, missing %s", got, want)
+					}
 				}
 			}
 			if fx.chart && !hasPart(f, "xl/charts/chart") {
