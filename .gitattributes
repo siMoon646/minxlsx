@@ -1,0 +1,5 @@
+# Check out text files with LF on every OS, so gofmt passes on Windows.
+* text=auto eol=lf
+
+# Spreadsheets are zip files: never touch their bytes.
+*.xlsx binary
