@@ -9,6 +9,12 @@ on:
 permissions:
   contents: read
 
+# One run per branch: a new push (or the PR for the same branch) cancels the
+# older run. Runs on main are never cancelled, so every main build finishes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 env:
   CGO_ENABLED: "1" # Fyne needs cgo (OpenGL)
   # Every go command (vet, test, lint, the final build) uses the same flags,
