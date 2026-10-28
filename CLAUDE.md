@@ -15,6 +15,8 @@ Read docs/DESIGN.md before starting work; it is the source of truth for scope, a
 - Saves are atomic: write a temp file in the same folder, then rename.
 - Portable: never write outside the executable's folder (settings live in ./settings/).
 - Never use Fyne’s Preferences API or app.NewWithID; portable settings live in ./settings/.
-- Run `gofmt -l . && go vet ./... && go test ./...` before saying a task is done (add `golangci-lint run` once installed).
+- Run `gofmt -l . && go vet ./... && golangci-lint run && go test ./...` before saying a task is done.
 - One milestone per branch; small commits with clear messages.
 - Ask before adding a new dependency.
+- When a decision changes scope, tools, or milestones, update docs/DESIGN.md in the same branch.
+- Use the Edit/Write tools for file changes, not shell scripts, so hooks and permissions apply.
