@@ -135,10 +135,21 @@ Seven milestones, each sized for one or two Claude Code sessions and ending with
 1. **Skeleton:** Go module, CLAUDE.md, GPL-3.0 LICENSE file, empty Fyne window, lint + tests wired up, CI building both executables
 2. **Read-only viewer:** open a file, show the grid and sheet tabs, formula bar shows the selected cell
 3. **Editing + save:** edit values, atomic save, Save As, unsaved-changes prompt, round-trip tests on all fixtures
+   - Before starting (from the milestone 1 review):
+     - Add the hand-made fixtures `excel.xlsx` (saved by Excel) and `libreoffice.xlsx` (saved by LibreOffice Calc); see `testdata/README.md`.
+     - Add a macro fixture (`.xlsm` with a small committed `vbaProject.bin`, via excelize's `AddVBAProject`) so the round-trip tests prove macros survive a save.
+     - Add a CSV fixture with CRLF line endings and a UTF-8 BOM, as Excel writes them.
+     - Make the styled-cell check compare each border's type, style and colour, not just how many borders there are.
+     - Add a `.golangci.yml` that enables at least `errcheck`, `gosec`, `bodyclose` and `errorlint`, so ignored file I/O errors fail lint.
 4. **Undo/redo:** command pattern for every edit
 5. **Structure edits:** insert/delete rows and columns, add/rename/delete/reorder sheets
 6. **Safety:** risky-content warning, `.bak` backup, paged loading for large files
 7. **Portable release:** app icon, settings beside the executable, README, test both builds from a real USB stick
+   - From the milestone 1 review:
+     - Never use Fyne's Preferences API. Once `fyne package` (or a `FyneApp.toml`) gives the app an ID, Fyne stores preferences in the user's config folder (e.g. `%APPDATA%`), which breaks portability. Add a test that settings are only written to `./settings/`.
+     - Pin `softprops/action-gh-release` (and other third-party actions) to a full commit SHA, since the release job has `contents: write`.
+     - Build release executables without restoring the Go build cache, so tagged releases always compile from clean.
+     - Publish a `SHA256SUMS` file with each release so users can verify the executables they copy.
 
 After the MVP, take v1.1 features one at a time in the same way.
 
