@@ -11,10 +11,14 @@ permissions:
 
 env:
   CGO_ENABLED: "1" # Fyne needs cgo (OpenGL)
+  # Every go command (vet, test, lint, the final build) uses the same flags,
+  # so they share one build cache and Fyne's C code is compiled only once.
+  GOFLAGS: -trimpath
 
 jobs:
   check:
     name: check (${{ matrix.os }})
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -30,13 +34,14 @@ jobs:
       run:
         shell: bash # same scripts on both OSes (Git Bash on Windows)
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      # Go version comes from go.mod; module + build cache is keyed on go.sum.
-      - uses: actions/setup-go@v5
+      # Go version comes from go.mod. Caching is done below instead of here:
+      # setup-go's cache keeps one entry per go.sum and never refreshes it.
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-          cache: true
+          cache: false
 
       # Fyne's C dependencies on Linux.
       - name: Install Fyne deps (Linux)
@@ -61,6 +66,24 @@ jobs:
       - name: Show gcc
         run: gcc --version
 
+      # Go build + module cache. A new entry is saved after every run (key ends
+      # in the run id) and restored from the newest match, so it never goes stale.
+      - name: Find Go cache dirs
+        id: goenv
+        run: |
+          echo "gocache=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
+          echo "gomodcache=$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+      - name: Restore Go cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ${{ steps.goenv.outputs.gocache }}
+            ${{ steps.goenv.outputs.gomodcache }}
+          key: go-${{ runner.os }}-${{ hashFiles('go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            go-${{ runner.os }}-${{ hashFiles('go.sum') }}-
+            go-${{ runner.os }}-
+
       - name: gofmt
         run: |
           unformatted="$(gofmt -l .)"
@@ -72,42 +95,51 @@ jobs:
         run: go vet ./...
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v8
+        uses: golangci/golangci-lint-action@v9
         with:
           version: v2.15.0 # pinned; Go 1.27 support needs v2.13.0+
 
       - name: go test
         run: go test ./...
 
-      - name: go build
-        run: go build ./...
-
       # Build the portable executable (stripped; no console window on Windows).
+      # -ldflags only changes linking, so compiled packages come from the cache.
       - name: Build ${{ matrix.bin }}
         run: |
           ldflags="-s -w"
           if [ "$RUNNER_OS" = "Windows" ]; then ldflags="$ldflags -H=windowsgui"; fi
-          GOARCH=amd64 go build -trimpath -ldflags "$ldflags" -o "dist/${{ matrix.bin }}" ./cmd/minxlsx
+          GOARCH=amd64 go build -ldflags "$ldflags" -o "dist/${{ matrix.bin }}" ./cmd/minxlsx
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.bin }}
           path: dist/${{ matrix.bin }}
           if-no-files-found: error
+
+      # Save even when a check failed, so the next run doesn't recompile Fyne.
+      - name: Save Go cache
+        if: ${{ !cancelled() && steps.goenv.outcome == 'success' }}
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ${{ steps.goenv.outputs.gocache }}
+            ${{ steps.goenv.outputs.gomodcache }}
+          key: go-${{ runner.os }}-${{ hashFiles('go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
 
   # Only on v* tags: attach both executables to a GitHub Release.
   release:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: check
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: |
             dist/minxlsx
