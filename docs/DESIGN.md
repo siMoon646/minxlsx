@@ -94,6 +94,7 @@ The MVP is "open, edit values, save safely"; everything else waits until that is
 | Basic formatting: bold, italic, number format | v1.1 |
 | Column width (drag to resize; marked unsaved, written to the file only on save) / row height, freeze panes | v1.1 |
 | Dark mode | v1.1 |
+| In-cell editing (an editor over the cell, like Excel; the MVP edits in the formula bar) | v1.1 |
 | Formula evaluation (via excelize's `CalcCellValue`) | Later |
 
 ## UI layout
@@ -108,6 +109,32 @@ One window with a menu bar and four strips top to bottom, no ribbon or sidebars.
 4. **Sheet tabs + status bar:** tabs with a + button to switch between a workbook's sheets; status shows the selection's count and sum
 
 **Keyboard shortcuts:** Ctrl+O/S/Z/Y as usual, Ctrl+Shift+S for Save As, arrows and Tab/Enter to move, Delete to clear, Ctrl+Space / Shift+Space to select column/row, Ctrl+Shift+= / Ctrl+- to insert/delete.
+
+**Editing (MVP):** cells are edited in the formula bar, not in the cell.
+- **Starting an edit:** F2, a double-click, or typing a character moves the cursor into the formula bar for the selected cell. A typed character replaces the content.
+- **Finishing an edit:** Enter commits and moves down, Tab commits and moves right, Esc cancels.
+- **Line breaks:** the formula bar keeps line breaks already in a cell. Typing new ones isn't supported yet.
+- **Grid keys:** in the grid, arrows move the selection, Enter moves down, Tab / Shift+Tab move right/left, and Delete or Backspace clears the cell.
+- **Merged cells:** editing a cell inside a merged range edits the range's top-left cell, the only one Excel shows.
+- **Save As:** a small form with a folder picker and a file-name field, with its own "overwrite?" confirm. Fyne's file-save dialog calls `os.Create` on the chosen file before handing it back, which empties an existing file before the atomic save even starts, so it isn't used.
+
+**How typed text is stored** (.xlsx/.xlsm; in a .csv everything is stored exactly as typed):
+
+| Typed | Stored as |
+| --- | --- |
+| empty | value cleared, style kept |
+| `'abc` | text `abc` (a leading `'` forces text) |
+| `=…` | formula (a lone `=` is text) |
+| `TRUE` / `FALSE` (any case) | boolean |
+| `-3`, `1234.5`, `.5`, `1e5` | number |
+| `2024-03-15`, `2024-03-15 13:45`, `2024-03-15 13:45:30` | date and time |
+| anything else | text |
+
+- **Numbers that stay text:** anything that would change if stored as a number. That means leading zeros (`007`), a leading `+`, more than 15 significant digits (Excel's precision), and values out of range.
+- **Dates are timezone-free:** they are parsed as plain dates in UTC, so the local timezone can never shift them by hours.
+- **Date formatting:** a cell that already has a date or time format keeps it. Otherwise the cell keeps its style (font, fill, borders) and gets `yyyy-mm-dd` (or `yyyy-mm-dd hh:mm[:ss]`) as its number format.
+
+**Undo:** every edit is a command on an undo stack from milestone 3, as CLAUDE.md requires. Milestone 4 adds the Undo/Redo buttons and Ctrl+Z/Y. Unsaved state is "the stack isn't where it was at the last save", so undoing back to the saved state counts as clean.
 
 ## File fidelity and data safety
 
@@ -124,6 +151,17 @@ The app must never silently destroy a user's file. excelize keeps most workbook 
   6. Sync the folder (Linux; Windows has no folder sync).
 
   If any step before the rename fails, the temp file is removed and the original is untouched. Tests check that a failed write leaves the original's bytes and permissions as they were, with no temp file left.
+- **Read-only files:** saving over a read-only file (no owner-write permission, or the Windows read-only flag) is refused before anything is written. The app then offers Save As. A permission error from the folder (for example a write-protected USB stick) gets the same offer. On Linux a rename only needs a writable folder, so without this check a read-only file would be replaced silently.
+- **Symlinks:** saving through a symlink writes to the link's target (temp file in the target's folder, the target's permissions) and keeps the link. A link whose target is missing is an error.
+- **Save As keeps the file type:** .xlsx saves as .xlsx and .xlsm as .xlsm, because switching would change or drop the macro part. A .csv can be saved as .csv or .xlsx.
+- **Shared formulas:** editing the first cell of a shared formula (the master, which holds the formula text the other cells reuse) would make excelize delete the formula from every cell in the group. Before such an edit, the other cells get their own plain copy of the formula. A scan of each sheet's XML on open finds the masters.
+- **Broken sheets:** the same scan checks that each sheet's XML is well-formed. excelize reads a broken sheet as an empty one, so a file with a broken sheet opens for viewing only, with editing and saving refused, so an empty sheet is never written over the user's data.
+- **Stale formula values:** MinXLSX has no calculation engine yet (formula evaluation is "Later"). After an edit, formulas that depend on the edited cell keep showing their old value in MinXLSX, and a newly typed formula shows no value until the file is recalculated. Saving after an edit sets the workbook's `fullCalcOnLoad` flag, so Excel and LibreOffice recalculate everything when they open the file.
+- **CSV files:** MinXLSX uses its own small CSV reader and writer, because Go's `encoding/csv` skips blank lines and rewrites line breaks inside cells.
+  - Every cell is text, exactly as written, so "007" and "1.50" never change.
+  - Saving keeps the BOM, the line endings (CRLF or LF), the final newline, each row's field count (trailing empty fields) and blank lines. Quotes are added only where needed.
+  - An unedited CSV saves back byte-for-byte, which is tested on both CSV fixtures.
+  - Only UTF-8 is accepted; other encodings are refused on open rather than garbled.
 - **Backup on first save:** keep `name.xlsx.bak` from the session's first save.
 - **Formulas stay formulas:** the grid shows the cached value (`GetCellValue`); the formula bar shows the formula (`GetCellFormula`). Both come from one load.
 - **Macro files:** open .xlsm and save back as .xlsm, keeping the macro part untouched.
@@ -151,7 +189,8 @@ Seven milestones, each sized for one or two Claude Code sessions and ending with
    - Files are read fully into memory. By default excelize unpacks any sheet over 16 MiB into the OS temp folder, which breaks the portable rule and is left behind on a crash, so `model.Open` raises that limit. A test checks no temp files are made.
 3. **Editing + save:** edit values, atomic save, Save As, unsaved-changes prompt, round-trip tests on all fixtures, open and save .csv files
    - Save (Ctrl+S) and Save As (Ctrl+Shift+S) go in the File menu and the toolbar. The unsaved-changes prompt covers closing the window and File → Quit.
-   - From the milestone 2 review: excelize reads a worksheet part full of broken XML as an empty sheet, with no error. Before saving, make sure such a sheet can't be written back empty over the user's data (refuse to save, or warn).
+   - Built as two PRs: **3a** is the model (save target rules, typed input, editing, save and round-trip tests, CSV); **3b** is the controller and UI (undo stack, formula-bar editing, Save/Save As, prompts). Each gets its own review.
+   - From the milestone 2 review: excelize reads a worksheet part full of broken XML as an empty sheet, with no error. Decided: such a file opens for viewing only (see "Broken sheets" above).
    - Before starting (from the milestone 1 review):
      - Excel-made fixtures come from Apache POI's test files (Apache-2.0): `excel-budget`, `excel-shared-formulas`, `excel-hidden-sheet`, `excel-unicode` and `excel-chart` (all `.xlsx`). `onlyoffice-bankbook.xlsx` is saved by ONLYOFFICE (tables with structured references, a shared `TODAY()` formula). A LibreOffice-saved file is optional, not required. See `testdata/README.md`.
      - From the ONLYOFFICE fixture: round-trip tests must check that every table's name (`displayName`) and range survive a save, since the fixture's structured references depend on them.
@@ -160,8 +199,8 @@ Seven milestones, each sized for one or two Claude Code sessions and ending with
      - Done: the styled-cell check compares each border's side, style and colour.
      - Done: `.golangci.yml` enables `errcheck`, `gosec`, `bodyclose` and `errorlint` on top of the standard set. errcheck uses `check-blank: true`, so `_ = f.Close()` fails lint as well. Tests are exempt only from gosec's file path and permission rules, and may discard errors with `_ =`.
    - Done: the atomic-save helper `writeFileAtomic` (see "Atomic saves" above), with tests. Save must call it with excelize's `Write`, never `SaveAs`. `SaveAs` writes straight over the target, and it creates new files with mode 0777 minus the umask, so on Linux they come out executable.
-   - Still open for Save: a read-only original can be replaced on Linux, because rename only needs a writable folder. Decide whether to refuse to save over a read-only file. Also, saving through a symlink replaces the link itself with a file.
-4. **Undo/redo:** command pattern for every edit
+   - Decided: saving over a read-only file refuses and offers Save As; saving through a symlink writes to the link's target and keeps the link (see "Read-only files" and "Symlinks" above).
+4. **Undo/redo:** Undo/Redo buttons and Ctrl+Z/Y on the undo stack from milestone 3, and commands for the structure edits
 5. **Structure edits:** insert/delete rows and columns, add/rename/delete/reorder sheets, unhide hidden sheets
 6. **Safety:** risky-content warning, `.bak` backup, paged loading for large files
    - Paged loading must not bring back excelize's temp files in the OS temp folder (see milestone 2); point `Options.TmpDir` beside the executable if it needs them.
