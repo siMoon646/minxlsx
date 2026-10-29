@@ -134,7 +134,10 @@ Seven milestones, each sized for one or two Claude Code sessions and ending with
 
 1. **Skeleton:** Go module, CLAUDE.md, GPL-3.0 LICENSE file, empty Fyne window, lint + tests wired up, CI building both executables
 2. **Read-only viewer:** open a file, show the grid and sheet tabs, formula bar shows the selected cell
-3. **Editing + save:** edit values, atomic save, Save As, unsaved-changes prompt, round-trip tests on all fixtures
+   - Opens .xlsx and .xlsm only; .csv moves to milestone 3 so reading and writing it land together.
+   - Hidden sheets get no tab (as in Excel) but stay in the file.
+   - Formulas without a saved result show an empty cell, since there is no calculation engine.
+3. **Editing + save:** edit values, atomic save, Save As, unsaved-changes prompt, round-trip tests on all fixtures, open and save .csv files
    - Before starting (from the milestone 1 review):
      - Excel-made fixtures come from Apache POI's test files (Apache-2.0): `excel-budget`, `excel-shared-formulas`, `excel-hidden-sheet`, `excel-unicode` and `excel-chart` (all `.xlsx`). `onlyoffice-bankbook.xlsx` is saved by ONLYOFFICE (tables with structured references, a shared `TODAY()` formula). A LibreOffice-saved file is optional, not required. See `testdata/README.md`.
      - From the ONLYOFFICE fixture: round-trip tests must check that every table's name (`displayName`) and range survive a save, since the fixture's structured references depend on them.
@@ -143,7 +146,7 @@ Seven milestones, each sized for one or two Claude Code sessions and ending with
      - Make the styled-cell check compare each border's type, style and colour, not just how many borders there are.
      - Add a `.golangci.yml` that enables at least `errcheck`, `gosec`, `bodyclose` and `errorlint`, so ignored file I/O errors fail lint.
 4. **Undo/redo:** command pattern for every edit
-5. **Structure edits:** insert/delete rows and columns, add/rename/delete/reorder sheets
+5. **Structure edits:** insert/delete rows and columns, add/rename/delete/reorder sheets, unhide hidden sheets
 6. **Safety:** risky-content warning, `.bak` backup, paged loading for large files
 7. **Portable release:** app icon, settings beside the executable, README, test both builds from a real USB stick
    - From the milestone 1 review:
