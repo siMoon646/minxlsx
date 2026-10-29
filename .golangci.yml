@@ -9,8 +9,18 @@ linters:
     - gosec      # file permissions, paths, unsafe calls
     - bodyclose  # unclosed HTTP response bodies
     - errorlint  # errors compared with == or type-asserted instead of errors.Is/As
+  settings:
+    errcheck:
+      # `_ = f.Close()` fails too: an error from a file being saved must be
+      # handled, not thrown away on purpose.
+      check-blank: true
   exclusions:
     rules:
+      # Tests may discard errors with `_ =` (e.g. closing a fixture they only
+      # read). A plain unchecked call still fails in tests.
+      - path: _test\.go
+        linters: [errcheck]
+        source: '(^|\s|\{\s*)_ = '
       # Tests read fixtures from computed paths and write them 0644 so they
       # stay readable in the repo. Production code gets every gosec rule.
       - path: _test\.go
