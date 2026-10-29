@@ -1,16 +1,20 @@
-# CI for MinXLSX: lint + test + build on Linux and Windows for every push/PR.
+# CI for MinXLSX: lint + test + build on Linux and Windows.
+# Runs on pushes to main and v* tags, and on every pull request (other
+# branches are checked through their PR, so they don't run twice).
 # Pushing a tag like v1.0.0 also publishes both executables to a GitHub Release.
 name: build
 
 on:
   push:
+    branches: [main]
+    tags: ["v*"]
   pull_request:
 
 permissions:
   contents: read
 
-# One run per branch: a new push (or the PR for the same branch) cancels the
-# older run. Runs on main are never cancelled, so every main build finishes.
+# One run per PR branch: a new push to the PR cancels the older run.
+# Runs on main are never cancelled, so every main build finishes.
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
