@@ -37,8 +37,6 @@ type MainWindow struct {
 	formula   *widget.Entry
 	table     *widget.Table
 	tabs      *fyne.Container // one button per visible sheet
-
-	sizedCols int // grid columns that already have a width
 }
 
 // NewMainWindow builds the window around a viewer. Call Window().ShowAndRun
@@ -138,7 +136,6 @@ func (mw *MainWindow) refresh() {
 		mw.win.SetTitle(appTitle)
 	}
 	mw.refreshTabs()
-	mw.setColumnWidths()
 	mw.table.Refresh()
 	mw.table.ScrollToTop()
 	mw.table.ScrollToLeading()

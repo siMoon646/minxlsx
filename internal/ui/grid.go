@@ -1,9 +1,12 @@
 package ui
 
 import (
+	"image/color"
 	"strconv"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
+	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 )
@@ -46,14 +49,25 @@ func (mw *MainWindow) gridSize() (rows, cols int) {
 	return rows, cols
 }
 
+// createCell makes a cell: a truncating label over an invisible spacer. The
+// spacer sets the default column width, because a truncating label has no
+// useful width of its own, and the table sizes columns from this template.
 func (mw *MainWindow) createCell() fyne.CanvasObject {
 	l := widget.NewLabel("")
 	l.Truncation = fyne.TextTruncateEllipsis
-	return l
+	spacer := canvas.NewRectangle(color.Transparent)
+	spacer.SetMinSize(fyne.NewSize(
+		fyne.MeasureText(cellWidthSample, theme.TextSize(), fyne.TextStyle{}).Width+2*theme.InnerPadding(), 0))
+	return container.NewStack(spacer, l)
 }
 
 func (mw *MainWindow) updateCell(id widget.TableCellID, o fyne.CanvasObject) {
-	o.(*widget.Label).SetText(mw.viewer.Value(id.Row, id.Col))
+	cellLabel(o).SetText(mw.viewer.Value(id.Row, id.Col))
+}
+
+// cellLabel returns the label inside a cell made by createCell.
+func cellLabel(o fyne.CanvasObject) *widget.Label {
+	return o.(*fyne.Container).Objects[1].(*widget.Label)
 }
 
 // createHeader makes a header label. Its sample text sets the width of the
@@ -75,17 +89,4 @@ func (mw *MainWindow) updateHeader(id widget.TableCellID, o fyne.CanvasObject) {
 	case id.Col < 0:
 		l.SetText(strconv.Itoa(id.Row + 1))
 	}
-}
-
-// setColumnWidths gives every grid column the default width. Cell labels
-// truncate, so they have no useful minimum width of their own. Columns that
-// already have a width are left alone.
-func (mw *MainWindow) setColumnWidths() {
-	w := fyne.MeasureText(cellWidthSample, theme.TextSize(), fyne.TextStyle{}).Width +
-		2*theme.InnerPadding()
-	_, cols := mw.gridSize()
-	for c := mw.sizedCols; c < cols; c++ {
-		mw.table.SetColumnWidth(c, w)
-	}
-	mw.sizedCols = max(mw.sizedCols, cols)
 }

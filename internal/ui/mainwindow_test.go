@@ -38,9 +38,9 @@ func openFixture(t *testing.T, mw *MainWindow, name string) {
 // cellText runs the grid's update function for one cell and returns what
 // the cell would show.
 func cellText(mw *MainWindow, row, col int) string {
-	l := mw.createCell().(*widget.Label)
-	mw.updateCell(widget.TableCellID{Row: row, Col: col}, l)
-	return l.Text
+	c := mw.createCell()
+	mw.updateCell(widget.TableCellID{Row: row, Col: col}, c)
+	return cellLabel(c).Text
 }
 
 func headerText(mw *MainWindow, row, col int) string {
@@ -85,6 +85,10 @@ func TestOpenShowsGrid(t *testing.T) {
 	// The grid is at least spreadsheet-sized even for small data.
 	if rows, cols := mw.gridSize(); rows < minGridRows || cols < minGridCols {
 		t.Errorf("grid = %d×%d, want at least %d×%d", rows, cols, minGridRows, minGridCols)
+	}
+	// Columns get a usable default width from the cell template.
+	if w := mw.createCell().MinSize().Width; w < 80 {
+		t.Errorf("default column width = %v, too narrow", w)
 	}
 	if !mw.formula.Disabled() {
 		t.Error("formula bar should be read-only in the viewer")

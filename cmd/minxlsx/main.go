@@ -7,6 +7,7 @@
 package main
 
 import (
+	"log"
 	"os"
 
 	fyneapp "fyne.io/fyne/v2/app"
@@ -21,7 +22,8 @@ func main() {
 	// executable instead, so the app stays portable.
 	a := fyneapp.New()
 
-	mw := ui.NewMainWindow(a, app.NewViewer())
+	viewer := app.NewViewer()
+	mw := ui.NewMainWindow(a, viewer)
 	w := mw.Window()
 	w.CenterOnScreen()
 	// A file given on the command line (or via "Open with") opens at start.
@@ -29,4 +31,10 @@ func main() {
 		mw.OpenFile(os.Args[1])
 	}
 	w.ShowAndRun()
+
+	// The window's close handler normally closes the file already; this
+	// covers quit paths that skip it. Close is safe to call twice.
+	if err := viewer.Close(); err != nil {
+		log.Printf("closing file: %v", err)
+	}
 }
