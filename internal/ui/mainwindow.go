@@ -72,12 +72,8 @@ func NewMainWindow(a fyne.App, v *app.Viewer) *MainWindow {
 		container.NewVBox(toolbar, formulaBar), tabBar, nil, nil, mw.table))
 	mw.win.Resize(fyne.NewSize(defaultWidth, defaultHeight))
 
-	mw.win.Canvas().AddShortcut(
-		&desktop.CustomShortcut{KeyName: fyne.KeyO, Modifier: fyne.KeyModifierShortcutDefault},
-		func(fyne.Shortcut) { mw.showOpenDialog() },
-	)
-	// Closing the window closes the file, which also removes any temp files
-	// excelize made for it (they live in the OS temp folder until then).
+	mw.win.SetMainMenu(mw.newMainMenu())
+	// Closing the window (or File → Quit) closes the file.
 	mw.win.SetOnClosed(func() {
 		mw.viewer.OnChange = nil // the widgets are going away
 		if err := mw.viewer.Close(); err != nil {
@@ -88,6 +84,15 @@ func NewMainWindow(a fyne.App, v *app.Viewer) *MainWindow {
 	v.OnChange = mw.refresh
 	mw.refresh()
 	return mw
+}
+
+// newMainMenu builds the menu bar. Menu-item shortcuts are handled by Fyne
+// before any widget sees the key, so Ctrl+O works wherever focus is. Fyne
+// adds File → Quit itself. Save and Save As come in milestone 3.
+func (mw *MainWindow) newMainMenu() *fyne.MainMenu {
+	open := fyne.NewMenuItem("Open…", mw.showOpenDialog)
+	open.Shortcut = &desktop.CustomShortcut{KeyName: fyne.KeyO, Modifier: fyne.KeyModifierShortcutDefault}
+	return fyne.NewMainMenu(fyne.NewMenu("File", open))
 }
 
 // Window returns the Fyne window.

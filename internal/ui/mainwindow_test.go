@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/widget"
 
@@ -182,6 +183,22 @@ func TestFailedOpenKeepsFile(t *testing.T) {
 	}
 	if v.FileName() != "plain.xlsx" || mw.fileLabel.Text != "plain.xlsx" {
 		t.Errorf("after failed open: viewer %q, label %q", v.FileName(), mw.fileLabel.Text)
+	}
+}
+
+func TestFileMenu(t *testing.T) {
+	mw, _ := newTestWindow(t)
+	menu := mw.Window().MainMenu()
+	if menu == nil || len(menu.Items) == 0 || menu.Items[0].Label != "File" {
+		t.Fatalf("main menu = %+v, want a File menu first", menu)
+	}
+	open := menu.Items[0].Items[0]
+	if open.Label != "Open…" || open.Action == nil {
+		t.Errorf("first File item = %q (action set: %v)", open.Label, open.Action != nil)
+	}
+	want := &desktop.CustomShortcut{KeyName: fyne.KeyO, Modifier: fyne.KeyModifierShortcutDefault}
+	if open.Shortcut == nil || open.Shortcut.ShortcutName() != want.ShortcutName() {
+		t.Errorf("Open shortcut = %v, want Ctrl+O", open.Shortcut)
 	}
 }
 
