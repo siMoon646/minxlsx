@@ -186,6 +186,24 @@ func TestFailedOpenKeepsFile(t *testing.T) {
 	}
 }
 
+// TestShutdownDoesNotRedraw covers the quit path where ShowAndRun returns
+// without the window's close handler: Shutdown must close the file without
+// calling back into the UI (on the real driver that panics after quit).
+func TestShutdownDoesNotRedraw(t *testing.T) {
+	mw, v := newTestWindow(t)
+	openFixture(t, mw, "plain.xlsx")
+	redrawn := false
+	v.OnChange = func() { redrawn = true }
+	mw.Shutdown()
+	mw.Shutdown() // twice is fine
+	if v.HasFile() {
+		t.Error("file still open after Shutdown")
+	}
+	if redrawn {
+		t.Error("Shutdown redrew the UI")
+	}
+}
+
 func TestFileMenu(t *testing.T) {
 	mw, _ := newTestWindow(t)
 	menu := mw.Window().MainMenu()

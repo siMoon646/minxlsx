@@ -74,12 +74,7 @@ func NewMainWindow(a fyne.App, v *app.Viewer) *MainWindow {
 
 	mw.win.SetMainMenu(mw.newMainMenu())
 	// Closing the window (or File → Quit) closes the file.
-	mw.win.SetOnClosed(func() {
-		mw.viewer.OnChange = nil // the widgets are going away
-		if err := mw.viewer.Close(); err != nil {
-			log.Printf("closing file: %v", err)
-		}
-	})
+	mw.win.SetOnClosed(mw.Shutdown)
 
 	v.OnChange = mw.refresh
 	mw.refresh()
@@ -93,6 +88,18 @@ func (mw *MainWindow) newMainMenu() *fyne.MainMenu {
 	open := fyne.NewMenuItem("Open…", mw.showOpenDialog)
 	open.Shortcut = &desktop.CustomShortcut{KeyName: fyne.KeyO, Modifier: fyne.KeyModifierShortcutDefault}
 	return fyne.NewMainMenu(fyne.NewMenu("File", open))
+}
+
+// Shutdown closes the open file without touching any widget, so it is safe
+// after the window or the whole app has gone (touching a widget then panics
+// in the GLFW driver). It runs when the window closes and again after
+// ShowAndRun returns, for quit paths that skip the window's close handler.
+// Calling it more than once is fine.
+func (mw *MainWindow) Shutdown() {
+	mw.viewer.OnChange = nil // stop Close from redrawing
+	if err := mw.viewer.Close(); err != nil {
+		log.Printf("closing file: %v", err)
+	}
 }
 
 // Window returns the Fyne window.
