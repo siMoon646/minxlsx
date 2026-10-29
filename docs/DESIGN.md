@@ -115,7 +115,15 @@ The app must never silently destroy a user's file. excelize keeps most workbook 
 
 - **No autosave:** every change (cell edits, structure edits, column widths) stays in memory until the user saves, with Ctrl+S, the toolbar's Save button, or File → Save / Save As. The file on disk only changes on an explicit save. Closing the window, or quitting, with unsaved changes asks first.
 - **Detect before editing:** on open, scan the .xlsx zip for `drawings/`, `charts/`, `pivotTables/` and `vbaProject.bin`; if found, show a banner: "This file contains items that may change on save."
-- **Atomic saves:** write to a temp file in the same folder, then rename over the original, so a crash or a pulled USB stick never leaves a half-written file.
+- **Atomic saves:** a crash or a pulled USB stick must never leave a half-written file. Every save goes through `writeFileAtomic` in `internal/model/atomic.go`, in this order:
+  1. Write a temp file in the same folder.
+  2. `Sync` it.
+  3. `Close` it and check the error.
+  4. Copy the original's permissions onto it. A new file gets 0666 minus the umask, never excelize's executable 0777.
+  5. Rename it over the original.
+  6. Sync the folder (Linux; Windows has no folder sync).
+
+  If any step before the rename fails, the temp file is removed and the original is untouched. Tests check that a failed write leaves the original's bytes and permissions as they were, with no temp file left.
 - **Backup on first save:** keep `name.xlsx.bak` from the session's first save.
 - **Formulas stay formulas:** the grid shows the cached value (`GetCellValue`); the formula bar shows the formula (`GetCellFormula`). Both come from one load.
 - **Macro files:** open .xlsm and save back as .xlsm, keeping the macro part untouched.
@@ -150,8 +158,9 @@ Seven milestones, each sized for one or two Claude Code sessions and ending with
      - Done: macro fixture `macro.xlsm`, built with `AddVBAProject` from `testdata/vbaProject.bin` (excelize's own test file, BSD-3-Clause). The round-trip tests must prove its `xl/vbaProject.bin` stays byte-identical after a save.
      - Done: CSV fixture `crlf-bom.csv`, with CRLF line endings and a UTF-8 BOM, as Excel writes them. It holds the same rows as `plain.csv`. Go's `encoding/csv` doesn't strip the BOM, so the CSV loader must.
      - Done: the styled-cell check compares each border's side, style and colour.
-     - Done: `.golangci.yml` enables `errcheck`, `gosec`, `bodyclose` and `errorlint` on top of the standard set. Tests are exempt only from gosec's file path and permission rules.
-   - Found while preparing: excelize's `SaveAs` creates new files with mode 0777 minus the umask, so a new file comes out executable on Linux. The atomic save writes a new temp file and renames it over the original, so it must give the temp file the original's permissions (and 0644 minus the umask for a brand-new file) before the rename.
+     - Done: `.golangci.yml` enables `errcheck`, `gosec`, `bodyclose` and `errorlint` on top of the standard set. errcheck uses `check-blank: true`, so `_ = f.Close()` fails lint as well. Tests are exempt only from gosec's file path and permission rules, and may discard errors with `_ =`.
+   - Done: the atomic-save helper `writeFileAtomic` (see "Atomic saves" above), with tests. Save must call it with excelize's `Write`, never `SaveAs`. `SaveAs` writes straight over the target, and it creates new files with mode 0777 minus the umask, so on Linux they come out executable.
+   - Still open for Save: a read-only original can be replaced on Linux, because rename only needs a writable folder. Decide whether to refuse to save over a read-only file. Also, saving through a symlink replaces the link itself with a file.
 4. **Undo/redo:** command pattern for every edit
 5. **Structure edits:** insert/delete rows and columns, add/rename/delete/reorder sheets, unhide hidden sheets
 6. **Safety:** risky-content warning, `.bak` backup, paged loading for large files
