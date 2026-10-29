@@ -35,7 +35,19 @@ even though the content is the same. Don't commit a regenerated
 | `empty.xlsx` | One sheet, no cells |
 | `large.xlsx` | 5,000 data rows × 3 columns plus a header (~100 KB), written with the stream writer |
 | `chart.xlsx` | Small table with a clustered column chart (for the risky-content warning) |
+| `macro.xlsm` | Macro-enabled workbook: a value, a formula, and `vbaProject.bin` (below) attached with excelize's `AddVBAProject`, with sheet code name `Sheet1` |
 | `plain.csv` | UTF-8 CSV with a quoted comma, embedded quotes, a newline inside a field, an empty field and non-ASCII text |
+| `crlf-bom.csv` | The same rows as `plain.csv`, written the way Excel's "CSV UTF-8" does: UTF-8 BOM, CRLF after every row (including the last), bare LF for the line break inside a cell. `.gitattributes` keeps its bytes exactly. |
+
+### `vbaProject.bin`
+
+The VBA project used to build `macro.xlsm` (a small
+`Worksheet_BeforeDoubleClick` handler for `Sheet1`). Copied unchanged from
+excelize v2.11.0's test files (`test/vbaProject.bin`, SHA-256
+`e24a20eb3419238b2ef8989fae057d0cce333ebb7186d4269709965c498b9540`).
+excelize is Copyright The excelize Authors and licensed under the
+[BSD 3-Clause License](https://github.com/qax-os/excelize/blob/master/LICENSE).
+`TestFixtureDetails` checks that `macro.xlsm` holds a byte-identical copy.
 
 ## Real-world fixtures
 
