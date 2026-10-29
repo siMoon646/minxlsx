@@ -1,0 +1,7 @@
+﻿Name,Qty,Note
+Apple,10,plain
+Banana,25,"has, comma"
+Cherry,-3,"has ""quotes"""
+Date,,"multi
+line"
+Köln,0.5,日本語

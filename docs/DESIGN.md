@@ -115,7 +115,15 @@ The app must never silently destroy a user's file. excelize keeps most workbook 
 
 - **No autosave:** every change (cell edits, structure edits, column widths) stays in memory until the user saves, with Ctrl+S, the toolbar's Save button, or File → Save / Save As. The file on disk only changes on an explicit save. Closing the window, or quitting, with unsaved changes asks first.
 - **Detect before editing:** on open, scan the .xlsx zip for `drawings/`, `charts/`, `pivotTables/` and `vbaProject.bin`; if found, show a banner: "This file contains items that may change on save."
-- **Atomic saves:** write to a temp file in the same folder, then rename over the original, so a crash or a pulled USB stick never leaves a half-written file.
+- **Atomic saves:** a crash or a pulled USB stick must never leave a half-written file. Every save goes through `writeFileAtomic` in `internal/model/atomic.go`, in this order:
+  1. Write a temp file in the same folder.
+  2. `Sync` it.
+  3. `Close` it and check the error.
+  4. Copy the original's permissions onto it. A new file gets 0666 minus the umask, never excelize's executable 0777.
+  5. Rename it over the original.
+  6. Sync the folder (Linux; Windows has no folder sync).
+
+  If any step before the rename fails, the temp file is removed and the original is untouched. Tests check that a failed write leaves the original's bytes and permissions as they were, with no temp file left.
 - **Backup on first save:** keep `name.xlsx.bak` from the session's first save.
 - **Formulas stay formulas:** the grid shows the cached value (`GetCellValue`); the formula bar shows the formula (`GetCellFormula`). Both come from one load.
 - **Macro files:** open .xlsm and save back as .xlsm, keeping the macro part untouched.
@@ -125,7 +133,7 @@ The app must never silently destroy a user's file. excelize keeps most workbook 
 
 Round-trip tests are the safety net: every change must keep "open → save → reopen" lossless.
 
-- **Fixture files** in `testdata/`: plain data, formulas, dates, merged cells, styled cells, multiple sheets, a CSV, real Excel-made files from Apache POI's test suite, one saved by ONLYOFFICE, and one with a chart (to test the warning). A LibreOffice-saved file is optional.
+- **Fixture files** in `testdata/`: plain data, formulas, dates, merged cells, styled cells, multiple sheets, a macro-enabled `.xlsm`, two CSVs (plain, and CRLF + BOM as Excel writes them), real Excel-made files from Apache POI's test suite, one saved by ONLYOFFICE, and one with a chart (to test the warning). A LibreOffice-saved file is optional.
 - **Round-trip tests:** open each fixture, save to a temp path, reopen, and compare every cell value, formula, merge and style.
 - **Model tests:** edits, undo/redo, row/column insert and delete, sheet operations.
 - **UI tests** with Fyne's headless `test` package: typing in a cell, keyboard navigation, the unsaved-changes prompt.
@@ -147,10 +155,12 @@ Seven milestones, each sized for one or two Claude Code sessions and ending with
    - Before starting (from the milestone 1 review):
      - Excel-made fixtures come from Apache POI's test files (Apache-2.0): `excel-budget`, `excel-shared-formulas`, `excel-hidden-sheet`, `excel-unicode` and `excel-chart` (all `.xlsx`). `onlyoffice-bankbook.xlsx` is saved by ONLYOFFICE (tables with structured references, a shared `TODAY()` formula). A LibreOffice-saved file is optional, not required. See `testdata/README.md`.
      - From the ONLYOFFICE fixture: round-trip tests must check that every table's name (`displayName`) and range survive a save, since the fixture's structured references depend on them.
-     - Add a macro fixture (`.xlsm` with a small committed `vbaProject.bin`, via excelize's `AddVBAProject`) so the round-trip tests prove macros survive a save.
-     - Add a CSV fixture with CRLF line endings and a UTF-8 BOM, as Excel writes them.
-     - Make the styled-cell check compare each border's type, style and colour, not just how many borders there are.
-     - Add a `.golangci.yml` that enables at least `errcheck`, `gosec`, `bodyclose` and `errorlint`, so ignored file I/O errors fail lint.
+     - Done: macro fixture `macro.xlsm`, built with `AddVBAProject` from `testdata/vbaProject.bin` (excelize's own test file, BSD-3-Clause). The round-trip tests must prove its `xl/vbaProject.bin` stays byte-identical after a save.
+     - Done: CSV fixture `crlf-bom.csv`, with CRLF line endings and a UTF-8 BOM, as Excel writes them. It holds the same rows as `plain.csv`. Go's `encoding/csv` doesn't strip the BOM, so the CSV loader must.
+     - Done: the styled-cell check compares each border's side, style and colour.
+     - Done: `.golangci.yml` enables `errcheck`, `gosec`, `bodyclose` and `errorlint` on top of the standard set. errcheck uses `check-blank: true`, so `_ = f.Close()` fails lint as well. Tests are exempt only from gosec's file path and permission rules, and may discard errors with `_ =`.
+   - Done: the atomic-save helper `writeFileAtomic` (see "Atomic saves" above), with tests. Save must call it with excelize's `Write`, never `SaveAs`. `SaveAs` writes straight over the target, and it creates new files with mode 0777 minus the umask, so on Linux they come out executable.
+   - Still open for Save: a read-only original can be replaced on Linux, because rename only needs a writable folder. Decide whether to refuse to save over a read-only file. Also, saving through a symlink replaces the link itself with a file.
 4. **Undo/redo:** command pattern for every edit
 5. **Structure edits:** insert/delete rows and columns, add/rename/delete/reorder sheets, unhide hidden sheets
 6. **Safety:** risky-content warning, `.bak` backup, paged loading for large files

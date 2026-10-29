@@ -1,9 +1,12 @@
 package model
 
 import (
+	"archive/zip"
+	"bytes"
 	"encoding/csv"
 	"flag"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"path/filepath"
@@ -158,6 +161,17 @@ func fixtures() []fixture {
 				fmt.Sprintf("Sheet1!A%d", largeRows+1): fmt.Sprint(largeRows),
 				fmt.Sprintf("Sheet1!B%d", largeRows+1): fmt.Sprintf("row %d", largeRows),
 				fmt.Sprintf("Sheet1!C%d", largeRows+1): fmt.Sprint(largeRows * 7 % 1000),
+			},
+		},
+		{
+			name:   "macro.xlsm",
+			build:  buildMacro,
+			sheets: []string{"Sheet1"},
+			cells: map[string]string{
+				"Sheet1!A1": "Macro fixture", "Sheet1!B1": "42",
+			},
+			forms: map[string]string{
+				"Sheet1!B2": "B1*2",
 			},
 		},
 		{
@@ -404,8 +418,33 @@ func buildChart(f *excelize.File) error {
 	})
 }
 
-// csvRows is the content of plain.csv. It includes a quoted comma, quotes,
-// a newline inside a field, unicode and an empty field.
+// vbaProjectFile is the VBA project in macro.xlsm, copied unchanged from
+// excelize's test files (see testdata/README.md). It holds a small
+// Worksheet_BeforeDoubleClick handler for Sheet1.
+const vbaProjectFile = "vbaProject.bin"
+
+func buildMacro(f *excelize.File) error {
+	if err := f.SetSheetRow("Sheet1", "A1", &[]any{"Macro fixture", 42}); err != nil {
+		return err
+	}
+	if err := f.SetCellFormula("Sheet1", "B2", "B1*2"); err != nil {
+		return err
+	}
+	// The VBA code is attached to the sheet by its code name.
+	codeName := "Sheet1"
+	if err := f.SetSheetProps("Sheet1", &excelize.SheetPropsOptions{CodeName: &codeName}); err != nil {
+		return err
+	}
+	vba, err := os.ReadFile(filepath.Join(testdataDir, vbaProjectFile))
+	if err != nil {
+		return err
+	}
+	// Saving with the .xlsm extension sets the macro-enabled content type.
+	return f.AddVBAProject(vba)
+}
+
+// csvRows is the content of plain.csv and crlf-bom.csv. It includes a quoted
+// comma, quotes, a newline inside a field, unicode and an empty field.
 var csvRows = [][]string{
 	{"Name", "Qty", "Note"},
 	{"Apple", "10", "plain"},
@@ -423,6 +462,23 @@ func writeCSV(path string) error {
 	}
 	return os.WriteFile(path, []byte(b.String()), 0o644)
 }
+
+// utf8BOM is the byte-order mark Excel puts at the start of a
+// "CSV UTF-8" file (U+FEFF, written as bytes so no editor turns it into an
+// invisible literal character).
+const utf8BOM = "\xef\xbb\xbf"
+
+// crlfBOMCSV is csvRows written the way Excel's "CSV UTF-8" does: a UTF-8
+// BOM, CRLF after every row (including the last), and a bare LF for a line
+// break inside a cell. It is spelled out byte for byte, because Go's
+// csv.Writer with UseCRLF would also turn the in-cell LF into CRLF.
+const crlfBOMCSV = utf8BOM +
+	"Name,Qty,Note\r\n" +
+	"Apple,10,plain\r\n" +
+	"Banana,25,\"has, comma\"\r\n" +
+	"Cherry,-3,\"has \"\"quotes\"\"\"\r\n" +
+	"Date,,\"multi\nline\"\r\n" +
+	"Köln,0.5,日本語\r\n"
 
 // TestGenerateFixtures writes all fixtures into testdata/. It only runs with
 // -update so normal test runs never modify the tree.
@@ -455,6 +511,9 @@ func TestGenerateFixtures(t *testing.T) {
 		})
 	}
 	if err := writeCSV(filepath.Join(testdataDir, "plain.csv")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(testdataDir, "crlf-bom.csv"), []byte(crlfBOMCSV), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -531,7 +590,7 @@ func TestFixtureDetails(t *testing.T) {
 				t.Errorf("%s font = %+v, want %+v", cell, got.Font, want.Font)
 			case len(want.Fill.Color) > 0 && (len(got.Fill.Color) == 0 || !strings.EqualFold(got.Fill.Color[0], want.Fill.Color[0])):
 				t.Errorf("%s fill = %+v, want %+v", cell, got.Fill, want.Fill)
-			case len(want.Border) > 0 && len(got.Border) != len(want.Border):
+			case len(want.Border) > 0 && !bordersEqual(got.Border, want.Border):
 				t.Errorf("%s borders = %+v, want %+v", cell, got.Border, want.Border)
 			case want.Alignment != nil && (got.Alignment == nil || *got.Alignment != *want.Alignment):
 				t.Errorf("%s alignment = %+v, want %+v", cell, got.Alignment, want.Alignment)
@@ -607,6 +666,57 @@ func TestFixtureDetails(t *testing.T) {
 		}
 	})
 
+	t.Run("macro.xlsm keeps its VBA project", func(t *testing.T) {
+		// Read the zip directly, so this checks the file and not excelize.
+		parts := zipParts(t, "macro.xlsm")
+		want, err := os.ReadFile(filepath.Join(testdataDir, vbaProjectFile))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, ok := parts["xl/vbaProject.bin"]; !ok || !bytes.Equal(got, want) {
+			t.Errorf("xl/vbaProject.bin missing or not identical to testdata/%s", vbaProjectFile)
+		}
+		checks := []struct{ part, want string }{
+			{"[Content_Types].xml", "application/vnd.ms-excel.sheet.macroEnabled.main+xml"},
+			{"[Content_Types].xml", "application/vnd.ms-office.vbaProject"},
+			{"xl/_rels/workbook.xml.rels", "relationships/vbaProject"},
+			{"xl/worksheets/sheet1.xml", `codeName="Sheet1"`},
+		}
+		for _, c := range checks {
+			if !strings.Contains(string(parts[c.part]), c.want) {
+				t.Errorf("%s does not contain %q", c.part, c.want)
+			}
+		}
+	})
+
+	t.Run("crlf-bom.csv is written like Excel", func(t *testing.T) {
+		data, err := os.ReadFile(filepath.Join(testdataDir, "crlf-bom.csv"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(data) != crlfBOMCSV {
+			t.Fatal("crlf-bom.csv differs from crlfBOMCSV (line endings changed by git?)")
+		}
+		body, ok := bytes.CutPrefix(data, []byte(utf8BOM))
+		if !ok {
+			t.Fatal("no UTF-8 BOM at the start")
+		}
+		if n := bytes.Count(body, []byte("\r\n")); n != len(csvRows) {
+			t.Errorf("%d CRLF row endings, want %d", n, len(csvRows))
+		}
+		if n := bytes.Count(body, []byte("\n")) - bytes.Count(body, []byte("\r\n")); n != 1 {
+			t.Errorf("%d bare LFs, want 1 (the line break inside a cell)", n)
+		}
+		// Go's csv reader doesn't strip a BOM; the app's CSV loader must.
+		got, err := csv.NewReader(bytes.NewReader(body)).ReadAll()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fmt.Sprint(got) != fmt.Sprint(csvRows) {
+			t.Errorf("csv = %q, want %q", got, csvRows)
+		}
+	})
+
 	t.Run("plain.csv parses", func(t *testing.T) {
 		data, err := os.ReadFile(filepath.Join(testdataDir, "plain.csv"))
 		if err != nil {
@@ -620,6 +730,71 @@ func TestFixtureDetails(t *testing.T) {
 			t.Errorf("csv = %q, want %q", got, csvRows)
 		}
 	})
+}
+
+// bordersEqual reports whether two cells have the same borders: the same
+// sides, each with the same line style and colour. Order doesn't matter.
+func bordersEqual(got, want []excelize.Border) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for _, w := range want {
+		found := slices.ContainsFunc(got, func(g excelize.Border) bool {
+			return g.Type == w.Type && g.Style == w.Style && strings.EqualFold(g.Color, w.Color)
+		})
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+func TestBordersEqual(t *testing.T) {
+	thin := []excelize.Border{
+		{Type: "left", Color: "000000", Style: 1},
+		{Type: "top", Color: "000000", Style: 1},
+	}
+	tests := []struct {
+		name string
+		got  []excelize.Border
+		want bool
+	}{
+		{"same", []excelize.Border{{Type: "left", Color: "000000", Style: 1}, {Type: "top", Color: "000000", Style: 1}}, true},
+		{"other order, colour case", []excelize.Border{{Type: "top", Color: "000000", Style: 1}, {Type: "left", Color: "000000", Style: 1}}, true},
+		{"different style", []excelize.Border{{Type: "left", Color: "000000", Style: 2}, {Type: "top", Color: "000000", Style: 1}}, false},
+		{"different colour", []excelize.Border{{Type: "left", Color: "FF0000", Style: 1}, {Type: "top", Color: "000000", Style: 1}}, false},
+		{"different side", []excelize.Border{{Type: "right", Color: "000000", Style: 1}, {Type: "top", Color: "000000", Style: 1}}, false},
+		{"missing side", thin[:1], false},
+	}
+	for _, tt := range tests {
+		if got := bordersEqual(tt.got, thin); got != tt.want {
+			t.Errorf("%s: bordersEqual = %v, want %v", tt.name, got, tt.want)
+		}
+	}
+}
+
+// zipParts reads every part of a fixture's zip package, without excelize.
+func zipParts(t *testing.T, name string) map[string][]byte {
+	t.Helper()
+	zr, err := zip.OpenReader(filepath.Join(testdataDir, name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = zr.Close() }()
+	parts := map[string][]byte{}
+	for _, zf := range zr.File {
+		rc, err := zf.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := io.ReadAll(rc)
+		_ = rc.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		parts[zf.Name] = data
+	}
+	return parts
 }
 
 func openFixture(t *testing.T, name string) *excelize.File {
