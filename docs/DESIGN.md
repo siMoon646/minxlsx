@@ -126,7 +126,7 @@ Round-trip tests are the safety net: every change must keep "open → save → r
 - **Round-trip tests:** open each fixture, save to a temp path, reopen, and compare every cell value, formula, merge and style.
 - **Model tests:** edits, undo/redo, row/column insert and delete, sheet operations.
 - **UI tests** with Fyne's headless `test` package: typing in a cell, keyboard navigation, the unsaved-changes prompt.
-- **CI:** GitHub Actions runs `golangci-lint` and `go test` on Windows and Linux for every push, then builds both executables on release.
+- **CI:** GitHub Actions runs `golangci-lint` and `go test` on Windows and Linux for every pull request and every push to main or a v* tag, then builds both executables on release.
 
 ## Milestones
 
