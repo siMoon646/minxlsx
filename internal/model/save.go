@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/xuri/excelize/v2"
@@ -30,8 +31,15 @@ func (wb *Workbook) SaveAs(path string) error {
 	case wb.readOnly != "":
 		return fmt.Errorf("can't save: %s", wb.readOnly)
 	}
-	if err := checkSaveType(wb.path, path); err != nil {
+	if err := wb.checkSaveType(path); err != nil {
 		return err
+	}
+	if wb.csv != nil && strings.EqualFold(filepath.Ext(path), ".csv") {
+		if err := writeFileAtomic(path, wb.writeCSV); err != nil {
+			return err
+		}
+		wb.path = path
+		return nil
 	}
 	if wb.edited {
 		on := true
@@ -50,21 +58,25 @@ func (wb *Workbook) SaveAs(path string) error {
 		return err
 	}
 	wb.path = path
+	wb.csv = nil // a CSV saved as .xlsx is now an .xlsx workbook
 	return nil
 }
 
 // SaveAsTypes returns the extensions the workbook may be saved as. Save As
 // keeps the file type: switching between .xlsx and .xlsm would change or
-// drop the macro part.
+// drop the macro part. A CSV may also become an .xlsx.
 func (wb *Workbook) SaveAsTypes() []string {
+	if wb.csv != nil {
+		return []string{".csv", ".xlsx"}
+	}
 	return []string{strings.ToLower(filepath.Ext(wb.path))}
 }
 
-// checkSaveType refuses to save to a different file type.
-func checkSaveType(from, to string) error {
-	want := strings.ToLower(filepath.Ext(from))
-	if got := strings.ToLower(filepath.Ext(to)); got != want {
-		return fmt.Errorf("save %s: can't save a %s file as %q (use a %s name)", to, want, filepath.Ext(to), want)
+// checkSaveType refuses to save to a file type not in SaveAsTypes.
+func (wb *Workbook) checkSaveType(to string) error {
+	types := wb.SaveAsTypes()
+	if slices.Contains(types, strings.ToLower(filepath.Ext(to))) {
+		return nil
 	}
-	return nil
+	return fmt.Errorf("save %s: can't save this file as %q (use %s)", to, filepath.Ext(to), strings.Join(types, " or "))
 }

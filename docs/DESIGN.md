@@ -159,8 +159,8 @@ The app must never silently destroy a user's file. excelize keeps most workbook 
 - **Stale formula values:** MinXLSX has no calculation engine yet (formula evaluation is "Later"). After an edit, formulas that depend on the edited cell keep showing their old value in MinXLSX, and a newly typed formula shows no value until the file is recalculated. Saving after an edit sets the workbook's `fullCalcOnLoad` flag, so Excel and LibreOffice recalculate everything when they open the file.
 - **CSV files:** MinXLSX uses its own small CSV reader and writer, because Go's `encoding/csv` skips blank lines and rewrites line breaks inside cells.
   - Every cell is text, exactly as written, so "007" and "1.50" never change.
-  - Saving keeps the BOM, the line endings (CRLF or LF), the final newline, each row's field count (trailing empty fields) and blank lines. Quotes are added only where needed.
-  - An unedited CSV saves back byte-for-byte, which is tested on both CSV fixtures.
+  - Every row the user didn't change is written back exactly as it was read: same quoting, same line ending, trailing empty fields and blank lines included. Changed or new rows are re-encoded, with quotes only where needed and the file's usual line ending. The BOM and the final newline (or its absence) are kept.
+  - An unedited CSV saves back byte-for-byte. That's tested on both CSV fixtures and on a deliberately messy file (unneeded quotes, unquoted leading spaces, mixed line endings, blank lines, no final newline).
   - Only UTF-8 is accepted; other encodings are refused on open rather than garbled.
 - **Backup on first save:** keep `name.xlsx.bak` from the session's first save.
 - **Formulas stay formulas:** the grid shows the cached value (`GetCellValue`); the formula bar shows the formula (`GetCellFormula`). Both come from one load.

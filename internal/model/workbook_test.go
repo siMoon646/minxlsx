@@ -211,7 +211,7 @@ func TestOpenErrors(t *testing.T) {
 		name, path, wantInErr string
 	}{
 		{"missing file", filepath.Join(dir, "missing.xlsx"), "missing.xlsx"},
-		{"csv not supported yet", filepath.Join(testdataDir, "plain.csv"), ".csv"},
+		{"unsupported type", filepath.Join(dir, "book.ods"), ".ods"},
 		{"no extension", filepath.Join(dir, "noext"), "noext"},
 		{"not a zip", notZip, "not-a-zip.xlsx"},
 	}

@@ -463,11 +463,6 @@ func writeCSV(path string) error {
 	return os.WriteFile(path, []byte(b.String()), 0o644)
 }
 
-// utf8BOM is the byte-order mark Excel puts at the start of a
-// "CSV UTF-8" file (U+FEFF, written as bytes so no editor turns it into an
-// invisible literal character).
-const utf8BOM = "\xef\xbb\xbf"
-
 // crlfBOMCSV is csvRows written the way Excel's "CSV UTF-8" does: a UTF-8
 // BOM, CRLF after every row (including the last), and a bare LF for a line
 // break inside a cell. It is spelled out byte for byte, because Go's

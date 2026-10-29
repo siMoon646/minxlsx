@@ -15,7 +15,8 @@ const (
 	maxCols = 16384
 )
 
-// Workbook is an open .xlsx or .xlsm file.
+// Workbook is an open .xlsx, .xlsm or .csv file. A CSV is held as a
+// one-sheet workbook whose cells are all text.
 //
 // Rows and columns are 0-based everywhere in this API; A1 is (0, 0).
 // A Workbook is not safe for concurrent use; the UI calls it from its own
@@ -25,6 +26,7 @@ type Workbook struct {
 	file     *excelize.File
 	sheets   map[string]sheetData // display values, loaded on first use
 	scan     map[string]sheetScan // from the open-time scan
+	csv      *csvFile             // set while the file is a CSV
 	readOnly string               // why it can't be edited or saved; "" if it can
 	edited   bool                 // a cell changed since open
 	closed   bool
@@ -55,8 +57,7 @@ func openOptions(tmpDir string) excelize.Options {
 	}
 }
 
-// Open opens an .xlsx or .xlsm file. Other extensions (including .csv, which
-// comes in milestone 3) are rejected.
+// Open opens an .xlsx, .xlsm or .csv file. Other extensions are rejected.
 func Open(path string) (*Workbook, error) {
 	return openWith(path, openOptions(""))
 }
@@ -64,10 +65,12 @@ func Open(path string) (*Workbook, error) {
 func openWith(path string, opts excelize.Options) (*Workbook, error) {
 	switch ext := strings.ToLower(filepath.Ext(path)); ext {
 	case ".xlsx", ".xlsm":
+	case ".csv":
+		return openCSV(path)
 	case "":
-		return nil, fmt.Errorf("open %s: unsupported file type (want .xlsx or .xlsm)", path)
+		return nil, fmt.Errorf("open %s: unsupported file type (want .xlsx, .xlsm or .csv)", path)
 	default:
-		return nil, fmt.Errorf("open %s: unsupported file type %s (want .xlsx or .xlsm)", path, ext)
+		return nil, fmt.Errorf("open %s: unsupported file type %s (want .xlsx, .xlsm or .csv)", path, ext)
 	}
 	f, err := excelize.OpenFile(path, opts)
 	if err != nil {

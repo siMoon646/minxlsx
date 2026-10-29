@@ -49,7 +49,14 @@ func (wb *Workbook) SetInput(sheet string, row, col int, input string) error {
 	if err != nil {
 		return err
 	}
-	if err := wb.apply(sheet, cell, parseInput(input)); err != nil {
+	in := parseInput(input)
+	if wb.csv != nil { // a CSV stores exactly what was typed
+		in = cellInput{kind: inputText, text: input}
+		if input == "" {
+			in = cellInput{kind: inputClear}
+		}
+	}
+	if err := wb.apply(sheet, cell, in); err != nil {
 		return fmt.Errorf("%s!%s: %w", sheet, cell, err)
 	}
 	if err := restoreGroup(); err != nil {
