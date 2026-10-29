@@ -23,13 +23,42 @@ const (
 type Workbook struct {
 	path   string
 	file   *excelize.File
-	rows   map[string][][]string // sheet -> display values, loaded on first use
+	sheets map[string]sheetData // loaded on first use
 	closed bool
+}
+
+// sheetData is one sheet's display values. Rows have different lengths,
+// because excelize drops trailing empty cells.
+type sheetData struct {
+	rows [][]string
+	cols int // length of the longest row
+}
+
+// openOptions makes excelize keep every part of the file in memory.
+//
+// By default excelize unpacks any worksheet or shared-strings part over
+// 16 MiB into a temp file in the OS temp folder, removed only by Close. A
+// crash or kill would leave it there, and it breaks the portable rule of
+// never writing outside the executable's folder. The viewer reads whole
+// sheets into memory anyway, so this costs little. Paged loading for big
+// files (milestone 6) should revisit this.
+//
+// tmpDir is only set by tests, to check that no temp files are made.
+func openOptions(tmpDir string) excelize.Options {
+	return excelize.Options{
+		UnzipSizeLimit:    excelize.UnzipSizeLimit,
+		UnzipXMLSizeLimit: excelize.UnzipSizeLimit,
+		TmpDir:            tmpDir,
+	}
 }
 
 // Open opens an .xlsx or .xlsm file. Other extensions (including .csv, which
 // comes in milestone 3) are rejected.
 func Open(path string) (*Workbook, error) {
+	return openWith(path, openOptions(""))
+}
+
+func openWith(path string, opts excelize.Options) (*Workbook, error) {
 	switch ext := strings.ToLower(filepath.Ext(path)); ext {
 	case ".xlsx", ".xlsm":
 	case "":
@@ -37,11 +66,16 @@ func Open(path string) (*Workbook, error) {
 	default:
 		return nil, fmt.Errorf("open %s: unsupported file type %s (want .xlsx or .xlsm)", path, ext)
 	}
-	f, err := excelize.OpenFile(path)
+	f, err := excelize.OpenFile(path, opts)
 	if err != nil {
+		// excelize can return a half-made file with the error; close it so
+		// any temp files it made are removed.
+		if f != nil {
+			err = errors.Join(err, f.Close())
+		}
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
-	return &Workbook{path: path, file: f, rows: map[string][][]string{}}, nil
+	return &Workbook{path: path, file: f, sheets: map[string]sheetData{}}, nil
 }
 
 // Close releases the file and any temp files excelize made for it. Calling
@@ -51,7 +85,7 @@ func (wb *Workbook) Close() error {
 		return nil
 	}
 	wb.closed = true
-	wb.rows = nil
+	wb.sheets = nil
 	if err := wb.file.Close(); err != nil {
 		return fmt.Errorf("close %s: %w", wb.path, err)
 	}
@@ -65,11 +99,15 @@ func (wb *Workbook) Closed() bool { return wb.closed }
 func (wb *Workbook) Path() string { return wb.path }
 
 // Sheets returns the visible sheets in workbook order. Hidden sheets are
-// left out but stay in the file.
+// left out but stay in the file. A sheet whose visibility can't be read is
+// shown, so no data is hidden from the user by mistake.
 func (wb *Workbook) Sheets() []string {
+	if wb.closed {
+		return nil
+	}
 	var out []string
 	for _, name := range wb.file.GetSheetList() {
-		if visible, err := wb.file.GetSheetVisible(name); err == nil && visible {
+		if visible, err := wb.file.GetSheetVisible(name); err != nil || visible {
 			out = append(out, name)
 		}
 	}
@@ -83,10 +121,7 @@ func (wb *Workbook) Size(sheet string) (rows, cols int, err error) {
 	if err != nil {
 		return 0, 0, err
 	}
-	for _, r := range data {
-		cols = max(cols, len(r))
-	}
-	return len(data), cols, nil
+	return len(data.rows), data.cols, nil
 }
 
 // Value returns the cell's display value (with number formats applied), as
@@ -94,11 +129,11 @@ func (wb *Workbook) Size(sheet string) (rows, cols int, err error) {
 // sheets all give "".
 func (wb *Workbook) Value(sheet string, row, col int) string {
 	data, err := wb.load(sheet)
-	if err != nil || row < 0 || col < 0 || row >= len(data) {
+	if err != nil || row < 0 || col < 0 || row >= len(data.rows) {
 		return ""
 	}
-	// GetRows drops trailing empty cells, so rows have different lengths.
-	if r := data[row]; col < len(r) {
+	// Rows have different lengths, so check the column in this row.
+	if r := data.rows[row]; col < len(r) {
 		return r[col]
 	}
 	return ""
@@ -125,18 +160,22 @@ func (wb *Workbook) Formula(sheet string, row, col int) (string, error) {
 }
 
 // load returns the sheet's display values, reading them on first use.
-func (wb *Workbook) load(sheet string) ([][]string, error) {
+func (wb *Workbook) load(sheet string) (sheetData, error) {
 	if wb.closed {
-		return nil, errors.New("workbook is closed")
+		return sheetData{}, errors.New("workbook is closed")
 	}
-	if data, ok := wb.rows[sheet]; ok {
+	if data, ok := wb.sheets[sheet]; ok {
 		return data, nil
 	}
-	data, err := wb.file.GetRows(sheet)
+	rows, err := wb.file.GetRows(sheet)
 	if err != nil {
-		return nil, fmt.Errorf("read sheet %q: %w", sheet, err)
+		return sheetData{}, fmt.Errorf("read sheet %q: %w", sheet, err)
 	}
-	wb.rows[sheet] = data
+	data := sheetData{rows: rows}
+	for _, r := range rows {
+		data.cols = max(data.cols, len(r))
+	}
+	wb.sheets[sheet] = data
 	return data, nil
 }
 

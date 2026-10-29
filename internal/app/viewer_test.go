@@ -1,8 +1,13 @@
 package app
 
 import (
+	"archive/zip"
+	"bytes"
+	"io"
+	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -112,6 +117,72 @@ func TestViewerFailedOpenKeepsFile(t *testing.T) {
 	}
 	if got := v.Value(0, 0); got != "Name" {
 		t.Errorf("A1 = %q after failed open", got)
+	}
+}
+
+// rewriteFixture copies a fixture into a temp folder, passing each zip part
+// through edit, and returns the new file's path.
+func rewriteFixture(t *testing.T, name string, edit func(part string, data []byte) []byte) string {
+	t.Helper()
+	zr, err := zip.OpenReader(fixture(name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = zr.Close() }()
+
+	out := filepath.Join(t.TempDir(), name)
+	f, err := os.Create(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(f)
+	for _, zf := range zr.File {
+		rc, err := zf.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := io.ReadAll(rc)
+		_ = rc.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		w, err := zw.Create(zf.Name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write(edit(zf.Name, data)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func TestViewerOpenRejectsBrokenFiles(t *testing.T) {
+	allHidden := rewriteFixture(t, "plain.xlsx", func(part string, data []byte) []byte {
+		if part == "xl/workbook.xml" {
+			return bytes.ReplaceAll(data, []byte(`<sheet `), []byte(`<sheet state="hidden" `))
+		}
+		return data
+	})
+	// The other failure path in Open (the first sheet can't be read) isn't
+	// reachable from a file: excelize's GetRows returns no rows, not an
+	// error, even for a worksheet part full of broken XML.
+	v := openViewer(t, "multisheet.xlsx")
+	err := v.Open(allHidden)
+	if err == nil {
+		t.Fatal("want error")
+	}
+	if !strings.Contains(err.Error(), "no visible sheets") {
+		t.Errorf("error %q does not mention no visible sheets", err)
+	}
+	if v.FileName() != "multisheet.xlsx" || v.Value(0, 0) != "Total" {
+		t.Errorf("previous file not kept: %q", v.FileName())
 	}
 }
 

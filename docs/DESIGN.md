@@ -137,7 +137,9 @@ Seven milestones, each sized for one or two Claude Code sessions and ending with
    - Opens .xlsx and .xlsm only; .csv moves to milestone 3 so reading and writing it land together.
    - Hidden sheets get no tab (as in Excel) but stay in the file.
    - Formulas without a saved result show an empty cell, since there is no calculation engine.
+   - Files are read fully into memory. By default excelize unpacks any sheet over 16 MiB into the OS temp folder, which breaks the portable rule and is left behind on a crash, so `model.Open` raises that limit. A test checks no temp files are made.
 3. **Editing + save:** edit values, atomic save, Save As, unsaved-changes prompt, round-trip tests on all fixtures, open and save .csv files
+   - From the milestone 2 review: excelize reads a worksheet part full of broken XML as an empty sheet, with no error. Before saving, make sure such a sheet can't be written back empty over the user's data (refuse to save, or warn).
    - Before starting (from the milestone 1 review):
      - Excel-made fixtures come from Apache POI's test files (Apache-2.0): `excel-budget`, `excel-shared-formulas`, `excel-hidden-sheet`, `excel-unicode` and `excel-chart` (all `.xlsx`). `onlyoffice-bankbook.xlsx` is saved by ONLYOFFICE (tables with structured references, a shared `TODAY()` formula). A LibreOffice-saved file is optional, not required. See `testdata/README.md`.
      - From the ONLYOFFICE fixture: round-trip tests must check that every table's name (`displayName`) and range survive a save, since the fixture's structured references depend on them.
@@ -148,9 +150,10 @@ Seven milestones, each sized for one or two Claude Code sessions and ending with
 4. **Undo/redo:** command pattern for every edit
 5. **Structure edits:** insert/delete rows and columns, add/rename/delete/reorder sheets, unhide hidden sheets
 6. **Safety:** risky-content warning, `.bak` backup, paged loading for large files
+   - Paged loading must not bring back excelize's temp files in the OS temp folder (see milestone 2); point `Options.TmpDir` beside the executable if it needs them.
 7. **Portable release:** app icon, settings beside the executable, README, test both builds from a real USB stick
    - From the milestone 1 review:
-     - Never use Fyne's Preferences API. Once `fyne package` (or a `FyneApp.toml`) gives the app an ID, Fyne stores preferences in the user's config folder (e.g. `%APPDATA%`), which breaks portability. Add a test that settings are only written to `./settings/`.
+     - Never use Fyne's Preferences API. Once `fyne package` (or a `FyneApp.toml`) gives the app an ID, Fyne stores preferences in the user's config folder (e.g. `%APPDATA%`), which breaks portability. Add a test that settings are only written to `./settings/`. Fyne's file dialog also writes preferences (last folder, view layout), so that test must open a file dialog too.
      - Pin `softprops/action-gh-release` (and other third-party actions) to a full commit SHA, since the release job has `contents: write`.
      - Build release executables without restoring the Go build cache, so tagged releases always compile from clean.
      - Publish a `SHA256SUMS` file with each release so users can verify the executables they copy.

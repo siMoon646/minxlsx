@@ -275,6 +275,67 @@ func TestWorkbookCloseTwice(t *testing.T) {
 	}
 }
 
+// dirEntries lists a folder's file names.
+func dirEntries(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
+}
+
+// TestOpenMakesNoTempFiles checks the portable rule: reading a workbook must
+// not write temp files (excelize puts them in the OS temp folder by default).
+func TestOpenMakesNoTempFiles(t *testing.T) {
+	tmp := t.TempDir()
+	wb, err := openWith(filepath.Join(testdataDir, "large.xlsx"), openOptions(tmp))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := wb.Size("Sheet1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wb.Formula("Sheet1", 5000, 1); err != nil {
+		t.Fatal(err)
+	}
+	if got := dirEntries(t, tmp); len(got) != 0 {
+		t.Errorf("temp files made while reading: %q", got)
+	}
+	if err := wb.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestTempFileCheckWorks is the control for TestOpenMakesNoTempFiles: with
+// excelize's small default-style limit, the same reads do make temp files,
+// and Close removes them.
+func TestTempFileCheckWorks(t *testing.T) {
+	tmp := t.TempDir()
+	opts := openOptions(tmp)
+	opts.UnzipXMLSizeLimit = 1024
+	wb, err := openWith(filepath.Join(testdataDir, "large.xlsx"), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := wb.Size("Sheet1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(dirEntries(t, tmp)) == 0 {
+		t.Error("expected temp files with a 1 KiB limit; the check can't see them")
+	}
+	if err := wb.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := dirEntries(t, tmp); len(got) != 0 {
+		t.Errorf("temp files left after Close: %q", got)
+	}
+}
+
 func TestCellNames(t *testing.T) {
 	if got := CellName(3, 1); got != "B4" {
 		t.Errorf("CellName(3, 1) = %q, want B4", got)
