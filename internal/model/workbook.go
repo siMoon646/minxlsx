@@ -58,6 +58,9 @@ func (wb *Workbook) Close() error {
 	return nil
 }
 
+// Closed reports whether Close has been called.
+func (wb *Workbook) Closed() bool { return wb.closed }
+
 // Path returns the path the workbook was opened from.
 func (wb *Workbook) Path() string { return wb.path }
 

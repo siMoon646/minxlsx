@@ -258,11 +258,20 @@ func TestWorkbookCloseTwice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if wb.Closed() {
+		t.Fatal("Closed() = true before Close")
+	}
 	if err := wb.Close(); err != nil {
 		t.Fatal(err)
 	}
+	if !wb.Closed() {
+		t.Error("Closed() = false after Close")
+	}
 	if err := wb.Close(); err != nil {
 		t.Errorf("second Close: %v", err)
+	}
+	if got := wb.Value("Sheet1", 0, 0); got != "" {
+		t.Errorf("Value after Close = %q, want empty", got)
 	}
 }
 
