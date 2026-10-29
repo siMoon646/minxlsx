@@ -21,8 +21,9 @@ linters:
       - path: _test\.go
         linters: [errcheck]
         source: '(^|\s|\{\s*)_ = '
-      # Tests read fixtures from computed paths and write them 0644 so they
-      # stay readable in the repo. Production code gets every gosec rule.
+      # Tests read fixtures from computed paths, write them 0644 so they
+      # stay readable in the repo, and chmod files to test read-only saves.
+      # Production code gets every gosec rule.
       - path: _test\.go
         linters: [gosec]
-        text: "G301|G304|G306|G703"
+        text: "G301|G302|G304|G306|G703"
