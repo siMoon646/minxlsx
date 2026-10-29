@@ -15,16 +15,19 @@ const (
 	maxCols = 16384
 )
 
-// Workbook is an open .xlsx or .xlsm file. For now it is read-only.
+// Workbook is an open .xlsx or .xlsm file.
 //
 // Rows and columns are 0-based everywhere in this API; A1 is (0, 0).
 // A Workbook is not safe for concurrent use; the UI calls it from its own
 // goroutine only.
 type Workbook struct {
-	path   string
-	file   *excelize.File
-	sheets map[string]sheetData // loaded on first use
-	closed bool
+	path     string
+	file     *excelize.File
+	sheets   map[string]sheetData // display values, loaded on first use
+	scan     map[string]sheetScan // from the open-time scan
+	readOnly string               // why it can't be edited or saved; "" if it can
+	edited   bool                 // a cell changed since open
+	closed   bool
 }
 
 // sheetData is one sheet's display values. Rows have different lengths,
@@ -75,7 +78,8 @@ func openWith(path string, opts excelize.Options) (*Workbook, error) {
 		}
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
-	return &Workbook{path: path, file: f, sheets: map[string]sheetData{}}, nil
+	scan, readOnly := scanSheets(f)
+	return &Workbook{path: path, file: f, sheets: map[string]sheetData{}, scan: scan, readOnly: readOnly}, nil
 }
 
 // Close releases the file and any temp files excelize made for it. Calling
