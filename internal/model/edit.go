@@ -671,9 +671,16 @@ func richTextReadsBack(text string) bool {
 }
 
 // sharedStringKey is the key excelize v2.11.0 files a new shared string
-// under: its bstrMarshal, copied from excelize's lib.go (BSD-3-Clause,
-// Copyright 2016 - 2025 The excelize Authors). FuzzSharedStringKey checks
-// it against excelize's behaviour; recheck it when upgrading excelize.
+// under: its bstrMarshal.
+//
+// Copied, with bstrExp and bstrEscapeExp below, from excelize v2.11.0
+// (lib.go). Copyright (c) 2016-2026 The excelize Authors; Copyright (c)
+// 2011-2017 Geoffrey J. Teale. Used under the BSD 3-Clause License; see
+// LICENSE.excelize in this folder for its full text, conditions and
+// disclaimer.
+//
+// FuzzSharedStringKey checks it against excelize's behaviour; recheck it
+// when upgrading excelize.
 func sharedStringKey(s string) (result string) {
 	matches, l, cursor := bstrExp.FindAllStringSubmatchIndex(s, -1), len(s), 0
 	for _, match := range matches {
@@ -705,7 +712,8 @@ func sharedStringKey(s string) (result string) {
 	return result
 }
 
-// The patterns sharedStringKey uses, as in excelize.
+// The patterns sharedStringKey uses, copied from excelize v2.11.0 (see
+// sharedStringKey and LICENSE.excelize).
 var (
 	bstrExp       = regexp.MustCompile(`_x[a-fA-F\d]{4}_`)
 	bstrEscapeExp = regexp.MustCompile(`x[a-fA-F\d]{4}_`)

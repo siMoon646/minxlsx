@@ -49,6 +49,15 @@ excelize is Copyright The excelize Authors and licensed under the
 [BSD 3-Clause License](https://github.com/qax-os/excelize/blob/master/LICENSE).
 `TestFixtureDetails` checks that `macro.xlsm` holds a byte-identical copy.
 
+### Code copied from excelize
+
+Not a fixture, but credited here with the other third-party material:
+`sharedStringKey` and its two patterns in `internal/model/edit.go` are
+copied from excelize v2.11.0 (`lib.go`: `bstrMarshal`, `bstrExp`,
+`bstrEscapeExp`). Copyright (c) 2016-2026 The excelize Authors and
+Copyright (c) 2011-2017 Geoffrey J. Teale, under the BSD 3-Clause License;
+the full licence is in `internal/model/LICENSE.excelize`.
+
 ## Real-world fixtures
 
 These must come from the real applications; never generate or fake them.
