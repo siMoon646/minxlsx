@@ -2,6 +2,8 @@ package model
 
 import (
 	"errors"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -140,6 +142,88 @@ func TestCollisionFallsBackToRichText(t *testing.T) {
 		if got := w.Value("Sheet1", 1, 0); got != "_x0041_" {
 			t.Errorf("A2 shows %q, want _x0041_", got)
 		}
+	}
+}
+
+// withSharedStrings opens plain.xlsx with its shared strings replaced by the
+// given <si> entries and Sheet1 by the given rows.
+func withSharedStrings(t *testing.T, entries, rows string) *Workbook {
+	t.Helper()
+	parts := zipParts(t, "plain.xlsx")
+	parts["xl/sharedStrings.xml"] = []byte(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+		`<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">` + entries + `</sst>`)
+	parts["xl/worksheets/sheet1.xml"] = []byte(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+		`<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>` +
+		rows + `</sheetData></worksheet>`)
+	return openAt(t, writeZip(t, "sst.xlsx", parts))
+}
+
+// TestFileEntryWithRunsNotReused: a shared-string entry in the file can have
+// both a plain part and runs (formatted or phonetic). excelize files it for
+// lookup under the plain part only, so typing that plain text must not reuse
+// the entry: with formatted runs the cell would read back as plain part +
+// runs, and with phonetic runs it would get another cell's phonetic guide.
+func TestFileEntryWithRunsNotReused(t *testing.T) {
+	entries := map[string]string{
+		"runs":     `<si><t>abc</t><r><rPr><b/></rPr><t>def</t></r></si>`,
+		"phonetic": `<si><t>abc</t><rPh sb="0" eb="1"><t>x</t></rPh></si>`,
+	}
+	cellA2 := regexp.MustCompile(`<c r="A2"[^>]*>(.*?)</c>`)
+	for name, si := range entries {
+		wb := withSharedStrings(t, si, `<row r="1"><c r="A1" t="s"><v>0</v></c></row>`)
+		a1 := wb.Value("Sheet1", 0, 0)
+		setInput(t, wb, "Sheet1", "A2", "abc")
+		path := filepath.Join(t.TempDir(), "saved.xlsx")
+		if err := wb.SaveAs(path); err != nil {
+			t.Fatal(err)
+		}
+		for _, w := range []*Workbook{wb, openAt(t, path)} {
+			if got := w.Value("Sheet1", 1, 0); got != "abc" {
+				t.Errorf("%s: A2 shows %q, want abc", name, got)
+			}
+			if got := w.Value("Sheet1", 0, 0); got != a1 {
+				t.Errorf("%s: A1 shows %q, want %q", name, got, a1)
+			}
+		}
+		m := cellA2.FindSubmatch(zipPartsAt(t, path)["xl/worksheets/sheet1.xml"])
+		if m == nil || strings.Contains(string(m[1]), "<v>0</v>") {
+			t.Errorf("%s: A2 saved as %q, want its own entry, not entry 0", name, m)
+		}
+	}
+}
+
+// TestRefusedEditChangesNothingElse: an edit refused before writing doesn't
+// rewrite the shared-formula group around the cell or mark the workbook (or
+// a CSV row) edited.
+func TestRefusedEditChangesNothingElse(t *testing.T) {
+	bad := CellSnapshot{typ: excelize.CellTypeSharedString, raw: strings.Repeat("x", maxCellChars+1)}
+	wb := openWorkbook(t, "excel-shared-formulas.xlsx")
+	cells := []string{"A2", "A3", "A10", "A41"}
+	before := map[string]cellState{}
+	for _, c := range cells {
+		before[c] = readCell(t, wb, "Label", c)
+	}
+	if err := wb.Restore("Label", 1, 0, bad); err == nil {
+		t.Fatal("want error for text over the cell limit")
+	}
+	for _, c := range cells {
+		if got := readCell(t, wb, "Label", c); got != before[c] {
+			t.Errorf("%s changed: %+v -> %+v", c, before[c], got)
+		}
+	}
+	if _, ok := wb.scan["Label"].masters["A2"]; !ok {
+		t.Error("A2 is no longer recorded as a shared-formula master")
+	}
+	if wb.Edited() {
+		t.Error("a refused edit marked the workbook edited")
+	}
+
+	csv := openCSVAt(t, writeCSVFile(t, "refused.csv", "a,b\n"))
+	if err := csv.Restore(csv.file.GetSheetList()[0], 0, 0, bad); err == nil {
+		t.Fatal("CSV: want error for text over the cell limit")
+	}
+	if csv.Edited() || csv.csv.edited[0] {
+		t.Errorf("CSV: refused edit marked edited (workbook %v, row %v)", csv.Edited(), csv.csv.edited[0])
 	}
 }
 

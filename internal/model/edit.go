@@ -1,6 +1,7 @@
 package model
 
 import (
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"math"
@@ -83,10 +84,12 @@ func (wb *Workbook) setInput(sheet string, row, col int, input string) error {
 // cell. It keeps a shared-formula group intact around it (see unshare),
 // even if the edit fails partway. If the edit fails before writing (a
 // refused text, a full table of cell formats), the cell is left exactly as
-// it was. If it fails after writing, the cell is put back as far as
-// restoreCell can (rich-text runs and a formula's cached value aren't in a
-// snapshot). The sheet's cached values are dropped and the workbook counts
-// as edited either way.
+// it was, and nothing else changes either (the shared-formula group isn't
+// rewritten, the workbook isn't marked edited). If it fails after writing,
+// the cell is put back as far as restoreCell can (rich-text runs and a
+// formula's cached value aren't in a snapshot), and the sheet's cached
+// values are dropped and the workbook counts as edited, as for a
+// successful edit.
 func (wb *Workbook) change(sheet, cell string, row int, edit func() (bool, error)) error {
 	before, err := wb.snapshotCell(sheet, cell)
 	if err != nil {
@@ -100,7 +103,15 @@ func (wb *Workbook) change(sheet, cell string, row int, edit func() (bool, error
 	if err == nil && wb.faultAfterEdit != nil {
 		wrote, err = true, wb.faultAfterEdit()
 	}
-	if err != nil && wrote {
+	if !wrote {
+		// Nothing changed: the group is still intact (unshare only read
+		// it), and the workbook isn't edited.
+		if err != nil {
+			return fmt.Errorf("%s!%s: %w", sheet, cell, err)
+		}
+		return nil
+	}
+	if err != nil {
 		if _, rerr := wb.restoreCell(sheet, cell, before); rerr != nil {
 			err = errors.Join(err, fmt.Errorf("putting the cell back also failed: %w", rerr))
 		}
@@ -506,30 +517,71 @@ func (wb *Workbook) setText(sheet, cell, text string) (wrote bool, err error) {
 // exactly as given.
 //
 // excelize keeps one shared-string entry per text and looks a new text up
-// in a map before adding an entry. Entries loaded from the file are filed
-// under their own stored text, so finding one is always right. But an entry
-// added in this session is filed under bstrMarshal(stored text), its own
-// escaped form, while the lookup uses the stored text as given. When the
-// two differ, a later text can equal an earlier text's key, and excelize
-// points the cell at the earlier entry: after "_x0041_" (stored as
-// "_x005F_x0041_", filed under "_x005F_x005F_x005F_x0041_"), the text
-// "_x005F_x0041_" (stored as "_x005F_x005F_x005F_x0041_") would get that
-// entry and read back as "_x0041_".
+// in a map before adding an entry. Finding the wrong entry happens two ways:
 //
-// Only SetCellStr adds to that map, and in MinXLSX only store calls it, so
-// store keeps its own copy of every key it may have added (keys) and spots
-// such a collision before writing anything.
+//   - An entry loaded from the file is filed under its plain part (<t>)
+//     only, but it can also have runs: formatted runs (<r>), which read back
+//     after the plain part, or phonetic runs (<rPh>), a reading guide shown
+//     above the text. Typing the plain part alone would get that entry, so
+//     <si><t>abc</t><r><t>def</t></r></si> would make "abc" read back as
+//     "abcdef".
+//   - An entry added in this session is filed under bstrMarshal(stored
+//     text), its own escaped form, while the lookup uses the stored text as
+//     given. When the two differ, a later text can equal an earlier text's
+//     key: after "_x0041_" (stored as "_x005F_x0041_", filed under
+//     "_x005F_x005F_x005F_x0041_"), the text "_x005F_x0041_" (stored as
+//     "_x005F_x005F_x005F_x0041_") would get that entry and read back as
+//     "_x0041_".
+//
+// Other entries from the file are filed under exactly their text, so
+// finding one is right. Only SetCellStr adds to the map, and in MinXLSX
+// only store calls it, so store keeps its own record of both kinds (withRuns
+// and keys) and spots a wrong match before writing anything.
 type textStore struct {
 	f *excelize.File
+	// withRuns holds the plain part of each entry in the file that also has
+	// runs.
+	withRuns map[string]bool
 	// keys maps each shared-string key that store may have added in this
 	// session to the stored texts that may be filed under it. It can hold
 	// more than excelize's map (an entry the lookup found in the file adds
 	// no key), never less, so a collision is never missed.
 	keys map[string]map[string]bool
+	// broken is set if the file's shared strings couldn't be read; text
+	// edits are then refused, since a wrong match couldn't be ruled out.
+	broken error
 }
 
+// sharedStringsPart is where excelize v2.11.0 always reads shared strings.
+const sharedStringsPart = "xl/sharedStrings.xml"
+
+// newTextStore makes the textStore for a file just opened (or made), before
+// anything is written to it.
 func newTextStore(f *excelize.File) *textStore {
-	return &textStore{f: f, keys: map[string]map[string]bool{}}
+	ts := &textStore{f: f, withRuns: map[string]bool{}, keys: map[string]map[string]bool{}}
+	data, ok := rawPart(f, sharedStringsPart)
+	if !ok {
+		return ts // no shared strings in the file
+	}
+	var sst struct {
+		SI []struct {
+			T *struct {
+				Val string `xml:",chardata"`
+			} `xml:"t"`
+			R   []struct{} `xml:"r"`
+			RPh []struct{} `xml:"rPh"`
+		} `xml:"si"`
+	}
+	if err := xml.Unmarshal(data, &sst); err != nil {
+		ts.broken = fmt.Errorf("the file's shared strings can't be read: %w", err)
+		return ts
+	}
+	for _, si := range sst.SI {
+		if si.T != nil && (len(si.R) > 0 || len(si.RPh) > 0) {
+			ts.withRuns[si.T.Val] = true
+		}
+	}
+	return ts
 }
 
 // store stores text in a cell and reports whether it wrote to the cell.
@@ -539,19 +591,26 @@ func newTextStore(f *excelize.File) *textStore {
 //   - The length limit is checked on the escaped text, because that is what
 //     excelize stores, and it cuts text over the limit short without an
 //     error.
-//   - If excelize's lookup would find another text's entry, the text is
-//     stored as a one-run rich-text entry instead, which skips the lookup.
-//     A rich-text run goes through excelize's own escaping, which can't
-//     hold every text (control characters, overlapping escape-like text),
-//     so that is checked on a scratch file first. Text it can't hold is
-//     refused with ErrTextNotExact, before anything is written.
-//   - Text containing "_x" is read back after it is stored, as a last
-//     check. A mismatch there means this model of excelize is wrong; the
-//     edit fails after writing and the caller puts the cell back.
+//   - If excelize's lookup would find an entry that isn't exactly this text,
+//     the text is stored as a one-run rich-text entry instead, which skips
+//     the lookup. A rich-text run goes through excelize's own escaping,
+//     which can't hold every text (control characters, overlapping
+//     escape-like text), so that is checked on a scratch file first. Text
+//     it can't hold is refused with ErrTextNotExact, before anything is
+//     written.
+//   - Every text is read back after it is stored, as a last check. A
+//     mismatch there means this model of excelize is wrong; the edit fails
+//     after writing and the caller puts the cell back.
 func (ts *textStore) store(sheet, cell, text string) (wrote bool, err error) {
+	if ts.broken != nil {
+		return false, ts.broken
+	}
 	stored := escapeText(text)
 	if err := checkStoredLength(stored); err != nil {
 		return false, err
+	}
+	if ts.withRuns[stored] {
+		return ts.storeRich(sheet, cell, text)
 	}
 	filed := ts.keys[stored]
 	for entry := range filed {
@@ -569,7 +628,7 @@ func (ts *textStore) store(sheet, cell, text string) (wrote bool, err error) {
 		}
 		ts.keys[key][stored] = true
 	}
-	return true, ts.checkReadsBack(sheet, cell, text, stored)
+	return true, ts.checkReadsBack(sheet, cell, text)
 }
 
 // storeRich stores text as a one-run rich-text entry (see store).
@@ -584,15 +643,11 @@ func (ts *textStore) storeRich(sheet, cell, text string) (wrote bool, err error)
 	if err := ts.f.SetCellRichText(sheet, cell, []excelize.RichTextRun{{Text: text}}); err != nil {
 		return true, err
 	}
-	return true, ts.checkReadsBack(sheet, cell, text, "_x")
+	return true, ts.checkReadsBack(sheet, cell, text)
 }
 
-// checkReadsBack checks that a cell holds exactly text, if stored contains
-// "_x" (other text can't be mixed up).
-func (ts *textStore) checkReadsBack(sheet, cell, text, stored string) error {
-	if !strings.Contains(stored, "_x") {
-		return nil
-	}
+// checkReadsBack checks that a cell holds exactly text.
+func (ts *textStore) checkReadsBack(sheet, cell, text string) error {
 	got, err := ts.f.GetCellValue(sheet, cell, excelize.Options{RawCellValue: true})
 	if err != nil {
 		return err
