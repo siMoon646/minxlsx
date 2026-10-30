@@ -19,7 +19,8 @@ func (wb *Workbook) Save() error {
 // SaveAs writes the workbook to path atomically (writeFileAtomic) and makes
 // path the workbook's file. It refuses a damaged workbook (ReadOnlyReason)
 // and a change of file type (see SaveAsTypes). A read-only target gives an
-// error matching ErrReadOnly.
+// error matching ErrReadOnly. An error matching ErrSavedNotSynced means the
+// file *was* saved, but the save may not survive a power cut yet.
 //
 // If any cell was edited, the workbook is marked for full recalculation on
 // load, because cached formula results may be stale (MinXLSX has no
@@ -35,11 +36,12 @@ func (wb *Workbook) SaveAs(path string) error {
 		return err
 	}
 	if wb.csv != nil && strings.EqualFold(filepath.Ext(path), ".csv") {
-		if err := writeFileAtomic(path, wb.writeCSV); err != nil {
+		err := writeFileAtomic(path, wb.writeCSV)
+		if err != nil && !errors.Is(err, ErrSavedNotSynced) {
 			return err
 		}
 		wb.path = path
-		return nil
+		return err
 	}
 	if wb.edited {
 		on := true
@@ -53,13 +55,15 @@ func (wb *Workbook) SaveAs(path string) error {
 	err := writeFileAtomic(path, func(w io.Writer) error {
 		return wb.file.Write(w)
 	})
-	if err != nil {
+	if err != nil && !errors.Is(err, ErrSavedNotSynced) {
 		wb.file.Path = oldPath
 		return err
 	}
+	// Saved (perhaps with a folder-sync warning in err): path is the
+	// workbook's file now.
 	wb.path = path
 	wb.csv = nil // a CSV saved as .xlsx is now an .xlsx workbook
-	return nil
+	return err
 }
 
 // SaveAsTypes returns the extensions the workbook may be saved as. Save As

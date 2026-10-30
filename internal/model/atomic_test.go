@@ -271,6 +271,49 @@ func TestWriteFileAtomicReadOnlyFolder(t *testing.T) {
 	assertFile(t, path, "old")
 }
 
+// failSync makes the folder sync after the rename fail.
+func failSync(t *testing.T) {
+	t.Helper()
+	old := syncDirFunc
+	syncDirFunc = func(string) error { return errors.New("sync failed (simulated)") }
+	t.Cleanup(func() { syncDirFunc = old })
+}
+
+// TestWriteFileAtomicFolderSyncFails: a failed folder sync after the rename
+// still means the file was saved, and the error says so.
+func TestWriteFileAtomicFolderSyncFails(t *testing.T) {
+	failSync(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "book.xlsx")
+	if err := writeFileAtomic(path, writeString("new")); !errors.Is(err, ErrSavedNotSynced) {
+		t.Fatalf("err = %v, want ErrSavedNotSynced", err)
+	}
+	assertFile(t, path, "new")
+	assertOnly(t, dir, "book.xlsx")
+}
+
+// TestSaveAsFolderSyncFails: SaveAs reports the sync warning but treats the
+// file as saved, so the workbook moves to the new path.
+func TestSaveAsFolderSyncFails(t *testing.T) {
+	for _, name := range []string{"plain.xlsx", "plain.csv"} {
+		t.Run(name, func(t *testing.T) {
+			wb := openAt(t, copyFixture(t, name))
+			setInput(t, wb, wb.file.GetSheetList()[0], "A1", "edited")
+			failSync(t)
+			path := filepath.Join(t.TempDir(), "out"+filepath.Ext(name))
+			if err := wb.SaveAs(path); !errors.Is(err, ErrSavedNotSynced) {
+				t.Fatalf("err = %v, want ErrSavedNotSynced", err)
+			}
+			if wb.Path() != path {
+				t.Errorf("Path() = %q, want %q", wb.Path(), path)
+			}
+			if _, err := os.Stat(path); err != nil {
+				t.Errorf("saved file missing: %v", err)
+			}
+		})
+	}
+}
+
 func TestWriteFileAtomicMissingFolder(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "no-such-folder", "book.xlsx")
 	if err := writeFileAtomic(path, writeString("x")); err == nil {

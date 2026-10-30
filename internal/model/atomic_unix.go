@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
 // syncDir flushes a folder's entries (e.g. a rename) to disk.
@@ -17,6 +18,20 @@ func syncDir(dir string) error {
 		return err
 	}
 	return errors.Join(d.Sync(), d.Close())
+}
+
+// fileWritable reports whether the file may be saved over. A file without
+// the owner-write bit is read-only, even for root, who could write it
+// anyway. Otherwise the OS decides, which accounts for owner and group.
+func fileWritable(path string, info fs.FileInfo) bool {
+	const wOK = 0x2 // W_OK
+	return info.Mode().Perm()&0o200 != 0 && syscall.Access(path, wOK) == nil
+}
+
+// isWriteProtected reports whether err comes from a read-only filesystem,
+// like a write-protected USB stick.
+func isWriteProtected(err error) bool {
+	return errors.Is(err, syscall.EROFS)
 }
 
 // newFileMode is what a normal program gives a new file: 0666 minus the

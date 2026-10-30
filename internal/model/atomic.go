@@ -71,12 +71,20 @@ func writeFileAtomic(path string, write func(w io.Writer) error) (err error) {
 	}
 	renamed = true
 	// The new file is in place now. A failed folder sync only means the
-	// rename might not survive a power cut yet, so report it but keep going.
-	if err := syncDir(dir); err != nil {
-		return fmt.Errorf("saved %s, but syncing its folder failed: %w", path, err)
+	// rename might not survive a power cut yet: the save happened, so the
+	// error matches ErrSavedNotSynced and callers treat the file as saved.
+	if err := syncDirFunc(dir); err != nil {
+		return fmt.Errorf("saved %s, but %w: %w", path, ErrSavedNotSynced, err)
 	}
 	return nil
 }
+
+// ErrSavedNotSynced means the file was saved but its folder couldn't be
+// flushed to disk, so a power cut right now might undo the save.
+var ErrSavedNotSynced = errors.New("the folder couldn't be flushed to disk")
+
+// syncDirFunc is syncDir, swappable in tests.
+var syncDirFunc = syncDir
 
 // ErrReadOnly means the file (or its folder) can't be written. The UI offers
 // Save As instead.
@@ -116,15 +124,16 @@ func targetMode(path string) (fs.FileMode, error) {
 		return 0, err
 	case !info.Mode().IsRegular():
 		return 0, errors.New("not a regular file")
-	case info.Mode().Perm()&0o200 == 0: // also set by Windows' read-only flag
+	case !fileWritable(path, info):
 		return 0, ErrReadOnly
 	}
 	return info.Mode().Perm(), nil
 }
 
-// readOnlyIfDenied makes a permission error also match ErrReadOnly.
+// readOnlyIfDenied makes a permission error, or a write-protected disk
+// (like a USB stick with its lock switch on), also match ErrReadOnly.
 func readOnlyIfDenied(err error) error {
-	if errors.Is(err, fs.ErrPermission) {
+	if errors.Is(err, fs.ErrPermission) || isWriteProtected(err) {
 		return fmt.Errorf("%w: %w", ErrReadOnly, err)
 	}
 	return err
