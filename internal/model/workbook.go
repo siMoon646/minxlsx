@@ -24,6 +24,7 @@ const (
 type Workbook struct {
 	path     string
 	file     *excelize.File
+	text     *textStore           // stores text in file's cells
 	sheets   map[string]sheetData // display values, loaded on first use
 	scan     map[string]sheetScan // from the open-time scan
 	csv      *csvFile             // set while the file is a CSV
@@ -86,7 +87,7 @@ func openWith(path string, opts excelize.Options) (*Workbook, error) {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
 	scan, readOnly := scanSheets(f)
-	return &Workbook{path: path, file: f, sheets: map[string]sheetData{}, scan: scan, readOnly: readOnly}, nil
+	return &Workbook{path: path, file: f, text: newTextStore(f), sheets: map[string]sheetData{}, scan: scan, readOnly: readOnly}, nil
 }
 
 // Close releases the file and any temp files excelize made for it. Calling

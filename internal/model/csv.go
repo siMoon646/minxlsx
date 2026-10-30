@@ -65,6 +65,7 @@ func openCSV(path string) (*Workbook, error) {
 			return fail(err)
 		}
 	}
+	texts := newTextStore(f)
 	for r, rec := range records {
 		if len(rec.fields) > maxCols {
 			return fail(fmt.Errorf("row %d has %d fields, more than a sheet can hold (%d)", r+1, len(rec.fields), maxCols))
@@ -73,7 +74,7 @@ func openCSV(path string) (*Workbook, error) {
 			if field == "" {
 				continue
 			}
-			if err := storeText(f, sheet, CellName(r, c), field); err != nil {
+			if _, err := texts.store(sheet, CellName(r, c), field); err != nil {
 				return fail(fmt.Errorf("row %d, field %d: %w", r+1, c+1, err))
 			}
 		}
@@ -81,6 +82,7 @@ func openCSV(path string) (*Workbook, error) {
 	return &Workbook{
 		path:   path,
 		file:   f,
+		text:   texts,
 		sheets: map[string]sheetData{},
 		scan:   map[string]sheetScan{},
 		csv:    &csvFile{bom: bom, records: records, edited: map[int]bool{}},

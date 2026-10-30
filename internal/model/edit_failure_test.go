@@ -2,6 +2,7 @@ package model
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/xuri/excelize/v2"
@@ -62,6 +63,83 @@ func TestCSVEscapeThenControl(t *testing.T) {
 	}
 	if got, want := readFile(t, path), escapeThenControl+",edited\n"; got != want {
 		t.Errorf("saved %q, want %q", got, want)
+	}
+}
+
+// collidingPair are two texts excelize mixes up when stored in that order:
+// a is stored as "_x0001_x0002_" and filed under its escaped form,
+// "_x005F_x0001_x0002_", which is exactly how b is stored. b has a control
+// character, so it can't fall back to rich text and must be refused.
+var collidingPair = [2]string{"\x01x0002_", "_x0001\x02"}
+
+// richCell is a two-run rich-text cell (one run bold) in Sheet1!A1.
+func richCell(t *testing.T) *Workbook {
+	t.Helper()
+	return newWorkbook(t, func(f *excelize.File) {
+		runs := []excelize.RichTextRun{{Text: "bold", Font: &excelize.Font{Bold: true}}, {Text: " plain"}}
+		if err := f.SetCellRichText("Sheet1", "A1", runs); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+// assertRichCell checks that Sheet1!A1 is still richCell's cell.
+func assertRichCell(t *testing.T, wb *Workbook, when string) {
+	t.Helper()
+	runs, err := wb.file.GetCellRichText("Sheet1", "A1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 2 || runs[0].Text != "bold" || runs[0].Font == nil || !runs[0].Font.Bold || runs[1].Text != " plain" {
+		t.Errorf("%s: A1 runs = %+v, want bold + plain", when, runs)
+	}
+}
+
+// TestRefusedTextKeepsRichCell: text that can't be stored exactly is
+// refused before anything is written, so the cell keeps everything,
+// including rich-text runs a snapshot can't hold.
+func TestRefusedTextKeepsRichCell(t *testing.T) {
+	wb := richCell(t)
+	setInput(t, wb, "Sheet1", "A2", "'"+collidingPair[0])
+	err := wb.SetInput("Sheet1", 0, 0, "'"+collidingPair[1])
+	if err == nil {
+		t.Fatal("SetInput succeeded, want ErrTextNotExact")
+	}
+	if !errors.Is(err, ErrTextNotExact) {
+		t.Errorf("SetInput error = %v, want ErrTextNotExact", err)
+	}
+	if strings.Contains(err.Error(), "mix") || !strings.Contains(err.Error(), "can't be stored exactly") {
+		t.Errorf("error message %q should say the text can't be stored exactly", err)
+	}
+	assertRichCell(t, wb, "in session")
+	assertRichCell(t, reopen(t, wb), "after save")
+}
+
+// TestRefusedRestoreKeepsRichCell: the same for undo.
+func TestRefusedRestoreKeepsRichCell(t *testing.T) {
+	wb := richCell(t)
+	setInput(t, wb, "Sheet1", "A2", "'"+collidingPair[0])
+	snap := CellSnapshot{typ: excelize.CellTypeSharedString, raw: collidingPair[1]}
+	if err := wb.Restore("Sheet1", 0, 0, snap); !errors.Is(err, ErrTextNotExact) {
+		t.Errorf("Restore error = %v, want ErrTextNotExact", err)
+	}
+	assertRichCell(t, wb, "in session")
+	assertRichCell(t, reopen(t, wb), "after save")
+}
+
+// TestCollisionFallsBackToRichText: a colliding text without control
+// characters is stored as rich text instead, even over a formula.
+func TestCollisionFallsBackToRichText(t *testing.T) {
+	wb := withSheetXML(t, `<row r="1"><c r="A1"><f>1+1</f><v>2</v></c></row>`)
+	setInput(t, wb, "Sheet1", "A2", "'_x0041_")
+	setInput(t, wb, "Sheet1", "A1", "'_x005F_x0041_")
+	for _, w := range []*Workbook{wb, reopen(t, wb)} {
+		if got := readCell(t, w, "Sheet1", "A1"); got.raw != "_x005F_x0041_" || got.formula != "" {
+			t.Errorf("A1 = %+v, want text _x005F_x0041_ and no formula", got)
+		}
+		if got := w.Value("Sheet1", 1, 0); got != "_x0041_" {
+			t.Errorf("A2 shows %q, want _x0041_", got)
+		}
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -75,16 +76,18 @@ func (wb *Workbook) setInput(sheet string, row, col int, input string) error {
 			return err // refused before anything changed
 		}
 	}
-	return wb.change(sheet, cell, row, func() error { return wb.apply(sheet, cell, in) })
+	return wb.change(sheet, cell, row, func() (bool, error) { return wb.apply(sheet, cell, in) })
 }
 
-// change runs an edit of one cell. It keeps a shared-formula group intact
-// around it (see unshare), even if the edit fails partway. If the edit
-// fails after changing the cell, the cell is put back as it was, as far as
-// restoreCell can; if it failed before changing anything, the cell is left
-// alone, so nothing a snapshot can't hold is lost. The sheet's cached values
-// are dropped and the workbook counts as edited either way.
-func (wb *Workbook) change(sheet, cell string, row int, edit func() error) error {
+// change runs an edit of one cell; edit reports whether it wrote to the
+// cell. It keeps a shared-formula group intact around it (see unshare),
+// even if the edit fails partway. If the edit fails before writing (a
+// refused text, a full table of cell formats), the cell is left exactly as
+// it was. If it fails after writing, the cell is put back as far as
+// restoreCell can (rich-text runs and a formula's cached value aren't in a
+// snapshot). The sheet's cached values are dropped and the workbook counts
+// as edited either way.
+func (wb *Workbook) change(sheet, cell string, row int, edit func() (bool, error)) error {
 	before, err := wb.snapshotCell(sheet, cell)
 	if err != nil {
 		return err
@@ -93,12 +96,14 @@ func (wb *Workbook) change(sheet, cell string, row int, edit func() error) error
 	if err != nil {
 		return err
 	}
-	err = edit()
+	wrote, err := edit()
 	if err == nil && wb.faultAfterEdit != nil {
-		err = wb.faultAfterEdit()
+		wrote, err = true, wb.faultAfterEdit()
 	}
-	if err != nil {
-		err = wb.putBack(sheet, cell, before, err)
+	if err != nil && wrote {
+		if _, rerr := wb.restoreCell(sheet, cell, before); rerr != nil {
+			err = errors.Join(err, fmt.Errorf("putting the cell back also failed: %w", rerr))
+		}
 	}
 	if gerr := restoreGroup(); gerr != nil {
 		err = errors.Join(err, gerr)
@@ -108,19 +113,6 @@ func (wb *Workbook) change(sheet, cell string, row int, edit func() error) error
 		return fmt.Errorf("%s!%s: %w", sheet, cell, err)
 	}
 	return nil
-}
-
-// putBack puts a cell back to before after an edit failed with err, unless
-// the cell still matches before. It returns err, joined with any error from
-// putting the cell back.
-func (wb *Workbook) putBack(sheet, cell string, before CellSnapshot, err error) error {
-	if now, serr := wb.snapshotCell(sheet, cell); serr == nil && now == before {
-		return err
-	}
-	if rerr := wb.restoreCell(sheet, cell, before); rerr != nil {
-		return errors.Join(err, fmt.Errorf("putting the cell back also failed: %w", rerr))
-	}
-	return err
 }
 
 // markEdited records that a cell in row changed: the workbook is edited,
@@ -150,8 +142,9 @@ func (wb *Workbook) markEdited(sheet string, row int) {
 //
 // Known limit: a number that needs more than 15 significant digits even in
 // its shortest form (like 0.30000000000000004) would come back as text if
-// retyped; SetInput's unchanged-input shortcut keeps it as it is when the
-// text isn't changed. Callers must not commit the formula bar when
+// retyped, and so would "-0" for a cell stored as negative zero; SetInput's
+// unchanged-input shortcut keeps them as they are when the text isn't
+// changed. Callers must not commit the formula bar when
 // EditText returns an error: the cell's text isn't known.
 func (wb *Workbook) EditText(sheet string, row, col int) (string, error) {
 	s, err := wb.Snapshot(sheet, row, col)
@@ -329,34 +322,51 @@ func (wb *Workbook) Restore(sheet string, row, col int, s CellSnapshot) error {
 	if err != nil {
 		return err
 	}
-	return wb.change(sheet, cell, row, func() error { return wb.restoreCell(sheet, cell, s) })
+	return wb.change(sheet, cell, row, func() (bool, error) { return wb.restoreCell(sheet, cell, s) })
 }
 
-// restoreCell puts a snapshot's content and style into a cell.
-func (wb *Workbook) restoreCell(sheet, cell string, s CellSnapshot) error {
-	f := wb.file
-	err := f.SetCellDefault(sheet, cell, "")
-	switch {
-	case err != nil:
-	case s.formula != "":
-		err = f.SetCellFormula(sheet, cell, s.formula)
-	case s.raw == "":
-	case s.typ == excelize.CellTypeBool:
-		err = f.SetCellBool(sheet, cell, s.raw == "1" || strings.EqualFold(s.raw, "TRUE"))
-	case isTextType(s.typ):
-		err = wb.setText(sheet, cell, s.raw)
-	case s.typ == excelize.CellTypeDate:
-		// An ISO date stored as text (t="d") comes back as the same date,
-		// stored as Excel's serial number.
-		err = wb.restoreISODate(sheet, cell, s.raw)
-	default:
-		// Numbers (and dates stored as numbers) go back as their exact raw
-		// value. Known limit: an error value typed as a constant (not from
-		// a formula), like #N/A, comes back as text.
-		err = f.SetCellDefault(sheet, cell, s.raw)
+// restoreCell puts a snapshot's content and style into a cell. It reports
+// whether it wrote to the cell: text that can't be stored exactly is
+// refused before anything is written.
+func (wb *Workbook) restoreCell(sheet, cell string, s CellSnapshot) (wrote bool, err error) {
+	wrote, err = wb.restoreContent(sheet, cell, s)
+	if !wrote {
+		return false, err
 	}
 	// The style goes back even if the content failed.
-	return errors.Join(err, f.SetCellStyle(sheet, cell, cell, s.style))
+	return true, errors.Join(err, wb.file.SetCellStyle(sheet, cell, cell, s.style))
+}
+
+// restoreContent puts a snapshot's content into a cell (see restoreCell).
+func (wb *Workbook) restoreContent(sheet, cell string, s CellSnapshot) (wrote bool, err error) {
+	f := wb.file
+	if s.formula == "" && s.raw != "" {
+		// These replace the cell's whole content (formula included) by
+		// themselves, so a refused text leaves the cell untouched.
+		switch {
+		case isTextType(s.typ):
+			return wb.setText(sheet, cell, s.raw)
+		case s.typ == excelize.CellTypeDate:
+			// An ISO date stored as text (t="d") comes back as the same
+			// date, stored as Excel's serial number.
+			return wb.restoreISODate(sheet, cell, s.raw)
+		}
+	}
+	if err := f.SetCellDefault(sheet, cell, ""); err != nil {
+		return true, err
+	}
+	switch {
+	case s.formula != "":
+		return true, f.SetCellFormula(sheet, cell, s.formula)
+	case s.raw == "":
+		return true, nil
+	case s.typ == excelize.CellTypeBool:
+		return true, f.SetCellBool(sheet, cell, s.raw == "1" || strings.EqualFold(s.raw, "TRUE"))
+	}
+	// Numbers (and dates stored as numbers) go back as their exact raw
+	// value. Known limit: an error value typed as a constant (not from a
+	// formula), like #N/A, comes back as text.
+	return true, f.SetCellDefault(sheet, cell, s.raw)
 }
 
 // isTextType reports whether a cell type holds text when the cell has no
@@ -397,40 +407,46 @@ func (wb *Workbook) editableCell(sheet string, row, col int) (string, error) {
 	return cell, nil
 }
 
-// apply stores a parsed input in a cell, keeping its style.
-func (wb *Workbook) apply(sheet, cell string, in cellInput) error {
+// apply stores a parsed input in a cell, keeping its style. It reports
+// whether it wrote to the cell.
+func (wb *Workbook) apply(sheet, cell string, in cellInput) (wrote bool, err error) {
 	f := wb.file
 	switch in.kind {
 	case inputClear:
-		return f.SetCellDefault(sheet, cell, "")
+		return true, f.SetCellDefault(sheet, cell, "")
 	case inputText:
 		return wb.setText(sheet, cell, in.text)
 	case inputFormula:
 		// Clear first, so the old value isn't kept as the formula's
 		// cached result.
 		if err := f.SetCellDefault(sheet, cell, ""); err != nil {
-			return err
+			return true, err
 		}
-		return f.SetCellFormula(sheet, cell, in.text)
+		return true, f.SetCellFormula(sheet, cell, in.text)
 	case inputBool:
-		return f.SetCellBool(sheet, cell, in.b)
+		return true, f.SetCellBool(sheet, cell, in.b)
 	case inputNumber:
-		return f.SetCellFloat(sheet, cell, in.num, -1, 64)
+		return true, f.SetCellFloat(sheet, cell, in.num, -1, 64)
 	case inputDate:
 		return wb.applyDate(sheet, cell, in)
 	}
-	return fmt.Errorf("unknown input kind %d", in.kind)
+	return false, fmt.Errorf("unknown input kind %d", in.kind)
 }
 
 // applyDate stores a date as Excel's serial number. excelize's own
 // SetCellValue(time.Time) always replaces the cell's number format, so the
 // serial is computed here and the format set only if the cell has no date
-// format yet.
-func (wb *Workbook) applyDate(sheet, cell string, in cellInput) error {
+// format yet. It reports whether it wrote to the cell.
+//
+// Known limit: if NewStyle fails (e.g. the workbook's table of cell formats
+// is full), the cell is untouched, but excelize may already have added the
+// new number format (and a font or fill) to the style sheet. Those unused
+// entries are saved with the file; they change nothing anyone sees.
+func (wb *Workbook) applyDate(sheet, cell string, in cellInput) (wrote bool, err error) {
 	f := wb.file
 	date1904, err := wb.date1904()
 	if err != nil {
-		return err
+		return false, err
 	}
 	if date1904 && in.t.Before(time.Date(1904, 1, 1, 0, 0, 0, 0, time.UTC)) {
 		// Before this workbook's first date: as a number it would be
@@ -439,99 +455,206 @@ func (wb *Workbook) applyDate(sheet, cell string, in cellInput) error {
 	}
 	id, err := f.GetCellStyle(sheet, cell)
 	if err != nil {
-		return err
+		return false, err
 	}
 	style, err := f.GetStyle(id)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if !isDateFormat(style) {
 		numFmt := in.numFmt
 		style.NumFmt, style.CustomNumFmt = 0, &numFmt
 		if id, err = f.NewStyle(style); err != nil {
-			return err
+			return false, err
 		}
 		if err := f.SetCellStyle(sheet, cell, cell, id); err != nil {
-			return err
+			return true, err
 		}
 	}
-	return f.SetCellFloat(sheet, cell, excelSerial(in.t, date1904), -1, 64)
+	return true, f.SetCellFloat(sheet, cell, excelSerial(in.t, date1904), -1, 64)
 }
 
 // restoreISODate puts back a date that was stored as ISO text (t="d"), as
-// Excel's serial number. If the text isn't a date it goes back as text.
-func (wb *Workbook) restoreISODate(sheet, cell, raw string) error {
+// Excel's serial number. If the text isn't a date it goes back as text. It
+// reports whether it wrote to the cell.
+func (wb *Workbook) restoreISODate(sheet, cell, raw string) (wrote bool, err error) {
 	t, ok := parseISODate(raw)
 	if !ok {
 		return wb.setText(sheet, cell, raw)
 	}
 	date1904, err := wb.date1904()
 	if err != nil {
-		return err
+		return false, err
 	}
-	return wb.file.SetCellFloat(sheet, cell, excelSerial(t, date1904), -1, 64)
+	return true, wb.file.SetCellFloat(sheet, cell, excelSerial(t, date1904), -1, 64)
 }
+
+// ErrTextNotExact is returned when text can't be stored so that it reads
+// back exactly as given. The cell is left as it was.
+var ErrTextNotExact = errors.New("this text can't be stored exactly")
 
 // maxCellChars is Excel's limit on text in one cell, in UTF-16 units (an
 // emoji counts as two).
 const maxCellChars = 32767
 
-// setText stores text in a cell exactly (see storeText).
-func (wb *Workbook) setText(sheet, cell, text string) error {
-	return storeText(wb.file, sheet, cell, text)
+// setText stores text in a cell exactly (see textStore.store).
+func (wb *Workbook) setText(sheet, cell, text string) (wrote bool, err error) {
+	return wb.text.store(sheet, cell, text)
 }
 
-// storeText stores text in a cell so it reads back exactly as given:
+// textStore stores text in the cells of one excelize file so it reads back
+// exactly as given.
+//
+// excelize keeps one shared-string entry per text and looks a new text up
+// in a map before adding an entry. Entries loaded from the file are filed
+// under their own stored text, so finding one is always right. But an entry
+// added in this session is filed under bstrMarshal(stored text), its own
+// escaped form, while the lookup uses the stored text as given. When the
+// two differ, a later text can equal an earlier text's key, and excelize
+// points the cell at the earlier entry: after "_x0041_" (stored as
+// "_x005F_x0041_", filed under "_x005F_x005F_x005F_x0041_"), the text
+// "_x005F_x0041_" (stored as "_x005F_x005F_x005F_x0041_") would get that
+// entry and read back as "_x0041_".
+//
+// Only SetCellStr adds to that map, and in MinXLSX only store calls it, so
+// store keeps its own copy of every key it may have added (keys) and spots
+// such a collision before writing anything.
+type textStore struct {
+	f *excelize.File
+	// keys maps each shared-string key that store may have added in this
+	// session to the stored texts that may be filed under it. It can hold
+	// more than excelize's map (an entry the lookup found in the file adds
+	// no key), never less, so a collision is never missed.
+	keys map[string]map[string]bool
+}
+
+func newTextStore(f *excelize.File) *textStore {
+	return &textStore{f: f, keys: map[string]map[string]bool{}}
+}
+
+// store stores text in a cell and reports whether it wrote to the cell.
 //
 //   - escapeText keeps escape-like text literal and escapes characters XML
 //     can't hold.
 //   - The length limit is checked on the escaped text, because that is what
 //     excelize stores, and it cuts text over the limit short without an
 //     error.
-//   - excelize looks a new shared string up by the text it is given, but
-//     files each new entry under its own escaped form of the text
-//     (bstrMarshal). When the two differ, a later text can equal an earlier
-//     text's key, and the cell is pointed at the earlier entry: after
-//     "_x0041_" (stored as "_x005F_x0041_", filed under
-//     "_x005F_x005F_x005F_x0041_"), the text "_x005F_x0041_" (stored as
-//     "_x005F_x005F_x005F_x0041_") gets that entry and reads back as
-//     "_x0041_". Keys only differ for text containing "_x", so that text is
-//     read back, and on a mismatch it is stored as a one-run rich-text
-//     entry, which skips the lookup.
-func storeText(f *excelize.File, sheet, cell, text string) error {
+//   - If excelize's lookup would find another text's entry, the text is
+//     stored as a one-run rich-text entry instead, which skips the lookup.
+//     A rich-text run goes through excelize's own escaping, which can't
+//     hold every text (control characters, overlapping escape-like text),
+//     so that is checked on a scratch file first. Text it can't hold is
+//     refused with ErrTextNotExact, before anything is written.
+//   - Text containing "_x" is read back after it is stored, as a last
+//     check. A mismatch there means this model of excelize is wrong; the
+//     edit fails after writing and the caller puts the cell back.
+func (ts *textStore) store(sheet, cell, text string) (wrote bool, err error) {
 	stored := escapeText(text)
 	if err := checkStoredLength(stored); err != nil {
-		return err
+		return false, err
 	}
-	if err := f.SetCellStr(sheet, cell, stored); err != nil {
-		return err
+	filed := ts.keys[stored]
+	for entry := range filed {
+		if entry != stored {
+			return ts.storeRich(sheet, cell, text)
+		}
 	}
+	if err := ts.f.SetCellStr(sheet, cell, stored); err != nil {
+		return true, err
+	}
+	if len(filed) == 0 { // the lookup may have missed and added an entry
+		key := sharedStringKey(stored)
+		if ts.keys[key] == nil {
+			ts.keys[key] = map[string]bool{}
+		}
+		ts.keys[key][stored] = true
+	}
+	return true, ts.checkReadsBack(sheet, cell, text, stored)
+}
+
+// storeRich stores text as a one-run rich-text entry (see store).
+func (ts *textStore) storeRich(sheet, cell, text string) (wrote bool, err error) {
+	if strings.IndexFunc(text, func(r rune) bool { return !xmlChar(r) }) >= 0 || !richTextReadsBack(text) {
+		return false, ErrTextNotExact
+	}
+	// SetCellRichText keeps a formula; clear the cell first.
+	if err := ts.f.SetCellDefault(sheet, cell, ""); err != nil {
+		return true, err
+	}
+	if err := ts.f.SetCellRichText(sheet, cell, []excelize.RichTextRun{{Text: text}}); err != nil {
+		return true, err
+	}
+	return true, ts.checkReadsBack(sheet, cell, text, "_x")
+}
+
+// checkReadsBack checks that a cell holds exactly text, if stored contains
+// "_x" (other text can't be mixed up).
+func (ts *textStore) checkReadsBack(sheet, cell, text, stored string) error {
 	if !strings.Contains(stored, "_x") {
 		return nil
 	}
-	if ok, err := readsBack(f, sheet, cell, text); err != nil || ok {
+	got, err := ts.f.GetCellValue(sheet, cell, excelize.Options{RawCellValue: true})
+	if err != nil {
 		return err
 	}
-	// A rich-text run goes through excelize's own escaping, which misses
-	// overlapping escape-like text and characters XML can't hold. The first
-	// can be caught by reading back; the second only shows after a save.
-	if strings.IndexFunc(text, func(r rune) bool { return !xmlChar(r) }) >= 0 {
-		return errors.New("this text can't be stored exactly (it contains control characters and text that excelize mixes up with another cell's)")
+	if got != text {
+		return fmt.Errorf("%w (excelize stored it differently)", ErrTextNotExact)
 	}
-	if err := f.SetCellRichText(sheet, cell, []excelize.RichTextRun{{Text: text}}); err != nil {
-		return err
-	}
-	if ok, err := readsBack(f, sheet, cell, text); err != nil || ok {
-		return err
-	}
-	return errors.New("this text can't be stored exactly (excelize mixes it up with another cell's text)")
+	return nil
 }
 
-// readsBack reports whether a cell holds exactly text.
-func readsBack(f *excelize.File, sheet, cell, text string) (bool, error) {
-	got, err := f.GetCellValue(sheet, cell, excelize.Options{RawCellValue: true})
-	return got == text, err
+// richTextReadsBack reports whether text stored as a one-run rich-text
+// entry reads back exactly. That depends only on the text (excelize finds
+// an existing rich-text entry only if it is identical), so it is checked on
+// a scratch file.
+func richTextReadsBack(text string) bool {
+	x := excelize.NewFile()
+	err := x.SetCellRichText("Sheet1", "A1", []excelize.RichTextRun{{Text: text}})
+	got, gerr := x.GetCellValue("Sheet1", "A1", excelize.Options{RawCellValue: true})
+	cerr := x.Close()
+	return err == nil && gerr == nil && cerr == nil && got == text
 }
+
+// sharedStringKey is the key excelize v2.11.0 files a new shared string
+// under: its bstrMarshal, copied from excelize's lib.go (BSD-3-Clause,
+// Copyright 2016 - 2025 The excelize Authors). FuzzSharedStringKey checks
+// it against excelize's behaviour; recheck it when upgrading excelize.
+func sharedStringKey(s string) (result string) {
+	matches, l, cursor := bstrExp.FindAllStringSubmatchIndex(s, -1), len(s), 0
+	for _, match := range matches {
+		result += s[cursor:match[0]]
+		subStr := s[match[0]:match[1]]
+		if subStr == "_x005F_" {
+			cursor = match[1]
+			if match[1]+6 <= l && bstrEscapeExp.MatchString(s[match[1]:match[1]+6]) {
+				_, err := strconv.Unquote(`"\u` + s[match[1]+1:match[1]+5] + `"`)
+				if err == nil {
+					result += subStr + "x005F" + subStr
+					continue
+				}
+			}
+			result += subStr + "x005F_"
+			continue
+		}
+		if bstrExp.MatchString(subStr) {
+			cursor = match[1]
+			if _, err := strconv.Unquote(`"\u` + s[match[0]+2:match[1]-1] + `"`); err == nil {
+				result += "_x005F" + subStr
+				continue
+			}
+		}
+	}
+	if cursor < l {
+		result += s[cursor:]
+	}
+	return result
+}
+
+// The patterns sharedStringKey uses, as in excelize.
+var (
+	bstrExp       = regexp.MustCompile(`_x[a-fA-F\d]{4}_`)
+	bstrEscapeExp = regexp.MustCompile(`x[a-fA-F\d]{4}_`)
+)
 
 // checkTextLength refuses text that won't fit in a cell once stored.
 func checkTextLength(text string) error {
