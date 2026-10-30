@@ -359,7 +359,7 @@ func TestReadingNeverRoundsStoredNumbers(t *testing.T) {
 		for r := range rows + 1 {
 			for c := range cols + 1 {
 				_ = wb.Value("Sheet1", r, c)
-				if _, err := wb.Formula("Sheet1", r, c); err != nil {
+				if _, err := wb.EditText("Sheet1", r, c); err != nil {
 					t.Fatal(err)
 				}
 				if _, err := wb.Snapshot("Sheet1", r, c); err != nil {

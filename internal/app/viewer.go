@@ -125,13 +125,14 @@ func (v *Viewer) Select(row, col int) {
 }
 
 // Selected returns the selected cell's address (e.g. "B4") and the text for
-// the formula bar: the formula with a leading "=", or the value.
+// the formula bar (model.EditText: the formula with a leading "=", or the
+// value as it would be typed).
 func (v *Viewer) Selected() (address, text string) {
 	address = model.CellName(v.row, v.col)
 	if v.wb == nil {
 		return address, ""
 	}
-	text, err := v.wb.Formula(v.sheets[v.sheet], v.row, v.col)
+	text, err := v.wb.EditText(v.sheets[v.sheet], v.row, v.col)
 	if err != nil {
 		return address, ""
 	}

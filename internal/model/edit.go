@@ -3,6 +3,8 @@ package model
 import (
 	"errors"
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,13 +41,25 @@ func (wb *Workbook) EditTarget(sheet string, row, col int) (int, int) {
 // SetInput sets a cell from typed text (see parseInput). An edit inside a
 // merged range goes to its top-left cell. The cell keeps its style, except
 // that a date gets a date format if it has none.
+//
+// Input equal to the cell's EditText changes nothing (so committing the
+// formula bar unchanged keeps a formula's cached result, and a number with
+// more digits than can be typed) and doesn't mark the workbook edited.
 func (wb *Workbook) SetInput(sheet string, row, col int, input string) error {
 	row, col = wb.EditTarget(sheet, row, col)
-	cell, err := wb.editableCell(sheet, row, col)
-	if err != nil {
+	if _, err := wb.editableCell(sheet, row, col); err != nil {
 		return err
 	}
-	restoreGroup, err := wb.unshare(sheet, cell)
+	if current, err := wb.EditText(sheet, row, col); err == nil && current == input {
+		return nil
+	}
+	return wb.setInput(sheet, row, col, input)
+}
+
+// setInput is SetInput without the unchanged-input shortcut.
+func (wb *Workbook) setInput(sheet string, row, col int, input string) error {
+	row, col = wb.EditTarget(sheet, row, col)
+	cell, err := wb.editableCell(sheet, row, col)
 	if err != nil {
 		return err
 	}
@@ -56,13 +70,42 @@ func (wb *Workbook) SetInput(sheet string, row, col int, input string) error {
 			in = cellInput{kind: inputClear}
 		}
 	}
-	if err := wb.apply(sheet, cell, in); err != nil {
-		return fmt.Errorf("%s!%s: %w", sheet, cell, err)
+	if in.kind == inputText {
+		if err := checkTextLength(in.text); err != nil {
+			return err // refused before anything changed
+		}
 	}
-	if err := restoreGroup(); err != nil {
+	before, err := wb.Snapshot(sheet, row, col)
+	if err != nil {
 		return err
 	}
+	err = wb.change(sheet, cell, row, func() error { return wb.apply(sheet, cell, in) })
+	if err != nil {
+		// Put the cell back as it was, as far as possible.
+		if rerr := wb.change(sheet, cell, row, func() error { return wb.restoreCell(sheet, cell, before) }); rerr != nil {
+			err = errors.Join(err, fmt.Errorf("putting the cell back also failed: %w", rerr))
+		}
+	}
+	return err
+}
+
+// change runs an edit of one cell. It keeps a shared-formula group intact
+// around it (see unshare), even if the edit fails partway. Even a failed
+// edit may have changed the cell, so the sheet's cached values are dropped
+// and the workbook counts as edited either way.
+func (wb *Workbook) change(sheet, cell string, row int, edit func() error) error {
+	restoreGroup, err := wb.unshare(sheet, cell)
+	if err != nil {
+		return err
+	}
+	err = edit()
+	if gerr := restoreGroup(); gerr != nil {
+		err = errors.Join(err, gerr)
+	}
 	wb.markEdited(sheet, row)
+	if err != nil {
+		return fmt.Errorf("%s!%s: %w", sheet, cell, err)
+	}
 	return nil
 }
 
@@ -75,6 +118,141 @@ func (wb *Workbook) markEdited(sheet string, row int) {
 		wb.csv.edited[row] = true
 	}
 	wb.refreshSheet(sheet)
+}
+
+// EditText returns the text the formula bar shows for a cell (the edit
+// target, as for SetInput): typing it back in recreates the cell.
+//
+//   - a formula: "=" and the formula
+//   - a number: its stored value, not the formatted one ("0.123456", not
+//     "0.12")
+//   - a date or time (a number with a date format): yyyy-mm-dd, plus hh:mm
+//     or hh:mm:ss if it has a time, when that gives back the exact same
+//     number; otherwise the number
+//   - a boolean: TRUE or FALSE
+//   - text: the text, with a leading ' if it would otherwise be read as
+//     something else ("'123", "'=x", "'TRUE", "”quoted")
+//   - in a CSV: the text as stored
+//
+// Known limit: a number with more digits than Excel takes as typed input
+// (over 15) would come back as text if retyped; SetInput's unchanged-input
+// shortcut keeps it as it is when the text isn't changed.
+func (wb *Workbook) EditText(sheet string, row, col int) (string, error) {
+	s, err := wb.Snapshot(sheet, row, col)
+	if err != nil {
+		return "", err
+	}
+	switch {
+	case s.formula != "":
+		return "=" + s.formula, nil
+	case wb.csv != nil, s.raw == "":
+		return s.raw, nil
+	case s.typ == excelize.CellTypeBool:
+		if s.raw == "1" || strings.EqualFold(s.raw, "TRUE") {
+			return "TRUE", nil
+		}
+		return "FALSE", nil
+	case isTextType(s.typ), s.typ == excelize.CellTypeError:
+		return typedText(s.raw), nil
+	case s.typ == excelize.CellTypeDate: // ISO date stored as text (t="d")
+		if t, ok := parseISODate(s.raw); ok {
+			if text, ok := dateText(t); ok {
+				return text, nil
+			}
+		}
+		return typedText(s.raw), nil
+	}
+	return wb.numberText(s.raw, s.style)
+}
+
+// typedText returns what to type to get the text s: s itself, or s with a
+// leading ' if parseInput would read it as something else.
+func typedText(s string) string {
+	if in := parseInput(s); in.kind == inputText && in.text == s {
+		return s
+	}
+	return "'" + s
+}
+
+// numberText returns the text for a stored number: an ISO date if the
+// cell has a date format and the date retypes to the same number, or the
+// stored value.
+func (wb *Workbook) numberText(raw string, styleID int) (string, error) {
+	n, perr := strconv.ParseFloat(raw, 64)
+	if perr != nil || math.IsNaN(n) || math.IsInf(n, 0) {
+		return raw, nil // not a number after all: show it as stored
+	}
+	style, err := wb.file.GetStyle(styleID)
+	if err != nil {
+		return "", err
+	}
+	if !isDateFormat(style) {
+		return raw, nil
+	}
+	date1904, err := wb.date1904()
+	if err != nil {
+		return "", err
+	}
+	text, ok := dateText(serialDate(n, date1904))
+	if !ok {
+		return raw, nil
+	}
+	// Only use the date if typing it gives back exactly this number.
+	in := parseInput(text)
+	if in.kind != inputDate || excelSerial(in.t, date1904) != n ||
+		(date1904 && in.t.Before(time.Date(1904, 1, 1, 0, 0, 0, 0, time.UTC))) {
+		return raw, nil
+	}
+	return text, nil
+}
+
+// dateText formats a date the way parseInput reads it, with as much of the
+// time as it has. It fails for a time with fractions of a second.
+func dateText(t time.Time) (string, bool) {
+	switch {
+	case t.Nanosecond() != 0:
+		return "", false
+	case t.Hour() == 0 && t.Minute() == 0 && t.Second() == 0:
+		return t.Format("2006-01-02"), true
+	case t.Second() == 0:
+		return t.Format("2006-01-02 15:04"), true
+	}
+	return t.Format("2006-01-02 15:04:05"), true
+}
+
+// serialDate converts Excel's serial number to a UTC date, rounded to the
+// second: the reverse of excelSerial. Serials before 60 (1 March 1900) use
+// the day-later epoch excelSerial uses for them.
+func serialDate(n float64, date1904 bool) time.Time {
+	var epoch time.Time
+	switch {
+	case date1904:
+		epoch = time.Date(1904, 1, 1, 0, 0, 0, 0, time.UTC)
+	case n < 60:
+		epoch = time.Date(1899, 12, 31, 0, 0, 0, 0, time.UTC)
+	default:
+		epoch = time.Date(1899, 12, 30, 0, 0, 0, 0, time.UTC)
+	}
+	return time.Unix(epoch.Unix()+int64(math.Round(n*86400)), 0).UTC()
+}
+
+// parseISODate reads a date stored as ISO text (t="d").
+func parseISODate(raw string) (time.Time, bool) {
+	for _, layout := range []string{time.RFC3339Nano, "2006-01-02T15:04:05.999999999", "2006-01-02"} {
+		if t, err := time.Parse(layout, raw); err == nil {
+			return t.UTC(), true
+		}
+	}
+	return time.Time{}, false
+}
+
+// date1904 reports whether the workbook counts dates from 1904.
+func (wb *Workbook) date1904() (bool, error) {
+	props, err := wb.file.GetWorkbookProps()
+	if err != nil {
+		return false, err
+	}
+	return props.Date1904 != nil && *props.Date1904, nil
 }
 
 // CellSnapshot is a cell's content and style, for undo.
@@ -116,12 +294,13 @@ func (wb *Workbook) Restore(sheet string, row, col int, s CellSnapshot) error {
 	if err != nil {
 		return err
 	}
-	restoreGroup, err := wb.unshare(sheet, cell)
-	if err != nil {
-		return err
-	}
+	return wb.change(sheet, cell, row, func() error { return wb.restoreCell(sheet, cell, s) })
+}
+
+// restoreCell puts a snapshot's content and style into a cell.
+func (wb *Workbook) restoreCell(sheet, cell string, s CellSnapshot) error {
 	f := wb.file
-	err = f.SetCellDefault(sheet, cell, "")
+	err := f.SetCellDefault(sheet, cell, "")
 	switch {
 	case err != nil:
 	case s.formula != "":
@@ -129,7 +308,7 @@ func (wb *Workbook) Restore(sheet string, row, col int, s CellSnapshot) error {
 	case s.raw == "":
 	case s.typ == excelize.CellTypeBool:
 		err = f.SetCellBool(sheet, cell, s.raw == "1" || strings.EqualFold(s.raw, "TRUE"))
-	case s.typ == excelize.CellTypeSharedString || s.typ == excelize.CellTypeInlineString:
+	case isTextType(s.typ):
 		err = wb.setText(sheet, cell, s.raw)
 	case s.typ == excelize.CellTypeDate:
 		// An ISO date stored as text (t="d") comes back as the same date,
@@ -141,17 +320,15 @@ func (wb *Workbook) Restore(sheet string, row, col int, s CellSnapshot) error {
 		// a formula), like #N/A, comes back as text.
 		err = f.SetCellDefault(sheet, cell, s.raw)
 	}
-	if err == nil {
-		err = f.SetCellStyle(sheet, cell, cell, s.style)
-	}
-	if err != nil {
-		return fmt.Errorf("%s!%s: %w", sheet, cell, err)
-	}
-	if err := restoreGroup(); err != nil {
-		return err
-	}
-	wb.markEdited(sheet, row)
-	return nil
+	// The style goes back even if the content failed.
+	return errors.Join(err, f.SetCellStyle(sheet, cell, cell, s.style))
+}
+
+// isTextType reports whether a cell type holds text when the cell has no
+// formula: shared and inline strings, and t="str" (normally a formula's
+// text result, but some files use it for plain text).
+func isTextType(t excelize.CellType) bool {
+	return t == excelize.CellTypeSharedString || t == excelize.CellTypeInlineString || t == excelize.CellTypeFormula
 }
 
 // existingCell checks the workbook is open and the cell is on an existing
@@ -216,11 +393,10 @@ func (wb *Workbook) apply(sheet, cell string, in cellInput) error {
 // format yet.
 func (wb *Workbook) applyDate(sheet, cell string, in cellInput) error {
 	f := wb.file
-	props, err := f.GetWorkbookProps()
+	date1904, err := wb.date1904()
 	if err != nil {
 		return err
 	}
-	date1904 := props.Date1904 != nil && *props.Date1904
 	if date1904 && in.t.Before(time.Date(1904, 1, 1, 0, 0, 0, 0, time.UTC)) {
 		// Before this workbook's first date: as a number it would be
 		// negative, which Excel shows as ####. Keep what was typed.
@@ -250,19 +426,15 @@ func (wb *Workbook) applyDate(sheet, cell string, in cellInput) error {
 // restoreISODate puts back a date that was stored as ISO text (t="d"), as
 // Excel's serial number. If the text isn't a date it goes back as text.
 func (wb *Workbook) restoreISODate(sheet, cell, raw string) error {
-	for _, layout := range []string{time.RFC3339Nano, "2006-01-02T15:04:05.999999999", "2006-01-02"} {
-		t, err := time.Parse(layout, raw)
-		if err != nil {
-			continue
-		}
-		props, err := wb.file.GetWorkbookProps()
-		if err != nil {
-			return err
-		}
-		date1904 := props.Date1904 != nil && *props.Date1904
-		return wb.file.SetCellFloat(sheet, cell, excelSerial(t.UTC(), date1904), -1, 64)
+	t, ok := parseISODate(raw)
+	if !ok {
+		return wb.setText(sheet, cell, raw)
 	}
-	return wb.setText(sheet, cell, raw)
+	date1904, err := wb.date1904()
+	if err != nil {
+		return err
+	}
+	return wb.file.SetCellFloat(sheet, cell, excelSerial(t, date1904), -1, 64)
 }
 
 // maxCellChars is Excel's limit on text in one cell, in UTF-16 units (an
@@ -324,6 +496,11 @@ func storeText(f *excelize.File, sheet, cell, text string) error {
 func readsBack(f *excelize.File, sheet, cell, text string) (bool, error) {
 	got, err := f.GetCellValue(sheet, cell, excelize.Options{RawCellValue: true})
 	return got == text, err
+}
+
+// checkTextLength refuses text that won't fit in a cell once stored.
+func checkTextLength(text string) error {
+	return checkStoredLength(escapeText(text))
 }
 
 func checkStoredLength(stored string) error {

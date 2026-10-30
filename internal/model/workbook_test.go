@@ -55,13 +55,13 @@ func TestWorkbookGeneratedFixtures(t *testing.T) {
 			for _, ref := range sortedKeys(fx.forms) {
 				sheet, cell := splitRef(t, ref)
 				row, col := cellIndex(t, cell)
-				got, err := wb.Formula(sheet, row, col)
+				got, err := wb.EditText(sheet, row, col)
 				if err != nil {
-					t.Errorf("Formula(%s): %v", ref, err)
+					t.Errorf("EditText(%s): %v", ref, err)
 					continue
 				}
 				if want := "=" + fx.forms[ref]; got != want {
-					t.Errorf("Formula(%s) = %q, want %q", ref, got, want)
+					t.Errorf("EditText(%s) = %q, want %q", ref, got, want)
 				}
 			}
 		})
@@ -88,13 +88,13 @@ func TestWorkbookRealWorldFixtures(t *testing.T) {
 			for _, ref := range sortedKeys(fx.forms) {
 				sheet, cell := splitRef(t, ref)
 				row, col := cellIndex(t, cell)
-				got, err := wb.Formula(sheet, row, col)
+				got, err := wb.EditText(sheet, row, col)
 				if err != nil {
-					t.Errorf("Formula(%s): %v", ref, err)
+					t.Errorf("EditText(%s): %v", ref, err)
 					continue
 				}
 				if want := "=" + fx.forms[ref]; got != want {
-					t.Errorf("Formula(%s) = %q, want %q", ref, got, want)
+					t.Errorf("EditText(%s) = %q, want %q", ref, got, want)
 				}
 			}
 		})
@@ -162,7 +162,7 @@ func TestWorkbookValueOutOfRange(t *testing.T) {
 	}
 }
 
-func TestWorkbookFormulaPlainCell(t *testing.T) {
+func TestWorkbookEditTextPlainCell(t *testing.T) {
 	wb := openWorkbook(t, "plain.xlsx")
 	tests := []struct {
 		cell, want string
@@ -174,17 +174,17 @@ func TestWorkbookFormulaPlainCell(t *testing.T) {
 	}
 	for _, tt := range tests {
 		row, col := cellIndex(t, tt.cell)
-		got, err := wb.Formula("Sheet1", row, col)
+		got, err := wb.EditText("Sheet1", row, col)
 		if err != nil {
-			t.Errorf("Formula(%s): %v", tt.cell, err)
+			t.Errorf("EditText(%s): %v", tt.cell, err)
 			continue
 		}
 		if got != tt.want {
-			t.Errorf("Formula(%s) = %q, want %q", tt.cell, got, tt.want)
+			t.Errorf("EditText(%s) = %q, want %q", tt.cell, got, tt.want)
 		}
 	}
-	if _, err := wb.Formula("Sheet1", -1, 0); err == nil {
-		t.Error("Formula(negative row): want error")
+	if _, err := wb.EditText("Sheet1", -1, 0); err == nil {
+		t.Error("EditText(negative row): want error")
 	}
 }
 
@@ -300,7 +300,7 @@ func TestOpenMakesNoTempFiles(t *testing.T) {
 	if _, _, err := wb.Size("Sheet1"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := wb.Formula("Sheet1", 5000, 1); err != nil {
+	if _, err := wb.EditText("Sheet1", 5000, 1); err != nil {
 		t.Fatal(err)
 	}
 	if got := dirEntries(t, tmp); len(got) != 0 {

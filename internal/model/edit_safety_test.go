@@ -164,6 +164,41 @@ func TestRestoreEscapedControlChar(t *testing.T) {
 	}
 }
 
+// TestRestoreStrTextCell: a text cell stored as t="str" without a formula
+// comes back as text on undo, not as a number.
+func TestRestoreStrTextCell(t *testing.T) {
+	wb := withSheetXML(t, `<row r="1"><c r="A1" t="str"><v>007</v></c></row>`)
+	snap, err := wb.Snapshot("Sheet1", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setInput(t, wb, "Sheet1", "A1", "other")
+	if err := wb.Restore("Sheet1", 0, 0, snap); err != nil {
+		t.Fatal(err)
+	}
+	if got := wb.Value("Sheet1", 0, 0); got != "007" {
+		t.Errorf("A1 shows %q after undo, want 007", got)
+	}
+	if et, err := wb.EditText("Sheet1", 0, 0); err != nil || et != "007" {
+		t.Errorf("EditText = %q (%v), want 007", et, err)
+	}
+}
+
+// TestRestoreFailureKeepsSharedGroup: if Restore fails partway on a shared
+// master, the group's other cells still keep their formulas.
+func TestRestoreFailureKeepsSharedGroup(t *testing.T) {
+	wb := openWorkbook(t, "excel-shared-formulas.xlsx")
+	bad := CellSnapshot{typ: excelize.CellTypeSharedString, raw: strings.Repeat("x", maxCellChars+1)}
+	if err := wb.Restore("Label", 1, 0, bad); err == nil {
+		t.Fatal("want error for text over the cell limit")
+	}
+	for _, cell := range []string{"A3", "A10", "A41"} {
+		if got := readCell(t, wb, "Label", cell).formula; got != "B"+cell[1:] {
+			t.Errorf("%s formula = %q after a failed restore of A2", cell, got)
+		}
+	}
+}
+
 func TestSetInputTextLimit(t *testing.T) {
 	wb := openWorkbook(t, "plain.xlsx")
 	setInput(t, wb, "Sheet1", "F1", strings.Repeat("a", maxCellChars))
@@ -211,7 +246,7 @@ func TestSetInputArrayFormulaLocked(t *testing.T) {
 		t.Error("refused edit marked the workbook edited")
 	}
 	setInput(t, wb, "Sheet1", "D1", "fine")
-	if got, err := wb.Formula("Sheet1", 0, 2); err != nil || got != "=A1:A2*B1:B2" {
+	if got, err := wb.EditText("Sheet1", 0, 2); err != nil || got != "=A1:A2*B1:B2" {
 		t.Errorf("C1 formula = %q (%v), want it unchanged", got, err)
 	}
 }

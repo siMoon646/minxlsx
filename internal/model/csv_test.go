@@ -128,7 +128,7 @@ func TestCSVValuesAreText(t *testing.T) {
 		if got := wb.Value(sheet, 0, c); got != w {
 			t.Errorf("col %d shows %q, want %q", c, got, w)
 		}
-		if got, err := wb.Formula(sheet, 0, c); err != nil || got != w {
+		if got, err := wb.EditText(sheet, 0, c); err != nil || got != w {
 			t.Errorf("col %d formula bar %q (%v), want %q", c, got, err, w)
 		}
 	}

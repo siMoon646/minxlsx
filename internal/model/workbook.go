@@ -146,26 +146,6 @@ func (wb *Workbook) Value(sheet string, row, col int) string {
 	return ""
 }
 
-// Formula returns what the formula bar shows: "=" plus the formula if the
-// cell has one, otherwise the cell's display value.
-func (wb *Workbook) Formula(sheet string, row, col int) (string, error) {
-	cell := CellName(row, col)
-	if cell == "" {
-		return "", fmt.Errorf("cell (%d, %d) is outside the sheet", row, col)
-	}
-	if wb.closed {
-		return "", errors.New("workbook is closed")
-	}
-	formula, err := wb.file.GetCellFormula(sheet, cell)
-	if err != nil {
-		return "", fmt.Errorf("%s!%s: %w", sheet, cell, err)
-	}
-	if formula != "" {
-		return "=" + formula, nil
-	}
-	return wb.Value(sheet, row, col), nil
-}
-
 // load returns the sheet's display values, reading them on first use.
 func (wb *Workbook) load(sheet string) (sheetData, error) {
 	if wb.closed {

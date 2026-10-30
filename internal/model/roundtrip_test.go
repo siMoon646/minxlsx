@@ -57,7 +57,7 @@ func readLikeUI(t *testing.T, wb *Workbook) {
 		for r := range rows {
 			for c := range cols {
 				_ = wb.Value(sheet, r, c)
-				if _, err := wb.Formula(sheet, r, c); err != nil {
+				if _, err := wb.EditText(sheet, r, c); err != nil {
 					t.Fatal(err)
 				}
 				if wb.ReadOnlyReason() == "" {
