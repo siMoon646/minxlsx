@@ -148,9 +148,11 @@ func (wb *Workbook) markEdited(sheet string, row int) {
 //     something else ("'123", "'=x", "'TRUE", "”quoted")
 //   - in a CSV: the text as stored
 //
-// Known limit: a number with more digits than Excel takes as typed input
-// (over 15) would come back as text if retyped; SetInput's unchanged-input
-// shortcut keeps it as it is when the text isn't changed.
+// Known limit: a number that needs more than 15 significant digits even in
+// its shortest form (like 0.30000000000000004) would come back as text if
+// retyped; SetInput's unchanged-input shortcut keeps it as it is when the
+// text isn't changed. Callers must not commit the formula bar when
+// EditText returns an error: the cell's text isn't known.
 func (wb *Workbook) EditText(sheet string, row, col int) (string, error) {
 	s, err := wb.Snapshot(sheet, row, col)
 	if err != nil {
@@ -189,19 +191,17 @@ func typedText(s string) string {
 }
 
 // numberText returns the text for a stored number: an ISO date if the
-// cell has a date format and the date retypes to the same number, or the
-// stored value.
+// cell has a date format and the date retypes to the same number, or
+// otherwise the number (see plainNumber). If the cell's style can't be
+// read, it is treated as having no date format.
 func (wb *Workbook) numberText(raw string, styleID int) (string, error) {
 	n, perr := strconv.ParseFloat(raw, 64)
 	if perr != nil || math.IsNaN(n) || math.IsInf(n, 0) {
 		return raw, nil // not a number after all: show it as stored
 	}
-	style, err := wb.file.GetStyle(styleID)
-	if err != nil {
-		return "", err
-	}
-	if !isDateFormat(style) {
-		return raw, nil
+	style, serr := wb.file.GetStyle(styleID)
+	if serr != nil || !isDateFormat(style) {
+		return plainNumber(raw, n), nil
 	}
 	date1904, err := wb.date1904()
 	if err != nil {
@@ -209,15 +209,30 @@ func (wb *Workbook) numberText(raw string, styleID int) (string, error) {
 	}
 	text, ok := dateText(serialDate(n, date1904))
 	if !ok {
-		return raw, nil
+		return plainNumber(raw, n), nil
 	}
 	// Only use the date if typing it gives back exactly this number.
 	in := parseInput(text)
 	if in.kind != inputDate || excelSerial(in.t, date1904) != n ||
 		(date1904 && in.t.Before(time.Date(1904, 1, 1, 0, 0, 0, 0, time.UTC))) {
-		return raw, nil
+		return plainNumber(raw, n), nil
 	}
 	return text, nil
+}
+
+// plainNumber returns the text for the number n, stored as raw: raw if it
+// retypes as n, or else n's shortest form if that does (excelize stores
+// 1e20 as "100000000000000000000", which has too many digits to type, so
+// it shows as "1E+20"). Otherwise raw, which would retype as text.
+func plainNumber(raw string, n float64) string {
+	if v, ok := parseNumber(raw); ok && v == n {
+		return raw
+	}
+	short := strings.ToUpper(strconv.FormatFloat(n, 'g', -1, 64))
+	if v, ok := parseNumber(short); ok && v == n {
+		return short
+	}
+	return raw
 }
 
 // dateText formats a date the way parseInput reads it, with as much of the

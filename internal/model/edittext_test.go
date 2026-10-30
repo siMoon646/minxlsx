@@ -45,6 +45,8 @@ var editTextCells = []editTextCell{
 	{cell: "A18", set: func(f *excelize.File, cell string) error { return f.SetCellBool("Sheet1", cell, true) }, want: "TRUE"},
 	{cell: "A19", set: func(f *excelize.File, cell string) error { return f.SetCellFormula("Sheet1", cell, "A7*2") }, want: "=A7*2"},
 	{cell: "A20", set: func(*excelize.File, string) error { return nil }, numFm: "0.00", want: ""}, // styled, empty
+	{cell: "A21", set: num(1e20), want: "1E+20"},                                                   // stored as 100000000000000000000
+	{cell: "A22", set: num(-1.5e-20), want: "-0.000000000000000000015"},                            // retypes as is
 }
 
 // editTextBook builds a workbook holding editTextCells.
@@ -87,6 +89,20 @@ func TestEditText(t *testing.T) {
 		if err != nil || got != c.want {
 			t.Errorf("EditText(%s) = %q (%v), want %q", c.cell, got, err, c.want)
 		}
+	}
+}
+
+// TestEditTextUnreadableStyle: a number whose style can't be read (here a
+// style id past the end of the table) shows its stored value, so the
+// formula bar isn't empty and committing it doesn't clear the cell.
+func TestEditTextUnreadableStyle(t *testing.T) {
+	wb := withSheetXML(t, `<row r="1"><c r="A1" s="99"><v>5</v></c></row>`)
+	if got, err := wb.EditText("Sheet1", 0, 0); err != nil || got != "5" {
+		t.Fatalf("EditText = %q (%v), want 5", got, err)
+	}
+	setInput(t, wb, "Sheet1", "A1", "5")
+	if got := wb.Value("Sheet1", 0, 0); got != "5" || wb.Edited() {
+		t.Errorf("A1 = %q, edited %v: want 5, unedited", got, wb.Edited())
 	}
 }
 
