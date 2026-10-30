@@ -32,6 +32,10 @@ type csvRecord struct {
 type csvFile struct {
 	bom     bool
 	records []csvRecord
+	// edited marks the rows (0-based) any edit touched. Every other row is
+	// written from its record, without asking excelize what it holds.
+	// Structure edits (milestone 5) must keep these row numbers in step.
+	edited map[int]bool
 }
 
 // openCSV loads a UTF-8 CSV file as a one-sheet workbook. Every cell is
@@ -69,11 +73,8 @@ func openCSV(path string) (*Workbook, error) {
 			if field == "" {
 				continue
 			}
-			if n := utf16Len(field); n > maxCellChars {
-				return fail(fmt.Errorf("row %d, field %d is %d characters long; a cell holds at most %d", r+1, c+1, n, maxCellChars))
-			}
-			if err := f.SetCellStr(sheet, CellName(r, c), escapeText(field)); err != nil {
-				return fail(fmt.Errorf("row %d: %w", r+1, err))
+			if err := storeText(f, sheet, CellName(r, c), field); err != nil {
+				return fail(fmt.Errorf("row %d, field %d: %w", r+1, c+1, err))
 			}
 		}
 	}
@@ -82,7 +83,7 @@ func openCSV(path string) (*Workbook, error) {
 		file:   f,
 		sheets: map[string]sheetData{},
 		scan:   map[string]sheetScan{},
-		csv:    &csvFile{bom: bom, records: records},
+		csv:    &csvFile{bom: bom, records: records, edited: map[int]bool{}},
 	}, nil
 }
 
@@ -152,9 +153,9 @@ func encodeCSVField(field string) string {
 	return `"` + strings.ReplaceAll(field, `"`, `""`) + `"`
 }
 
-// writeCSV writes the sheet as CSV. A row whose fields are unchanged is
-// written exactly as it was read; a changed or new row is encoded with the
-// file's usual line ending. The file keeps its BOM and its final newline
+// writeCSV writes the sheet as CSV. A row no edit touched (or whose fields
+// are back to the original) is written exactly as it was read; a changed
+// or new row is encoded with the file's usual line ending. The file keeps its BOM and its final newline
 // (or lack of one).
 func (wb *Workbook) writeCSV(w io.Writer) error {
 	sheet := wb.file.GetSheetList()[0]
@@ -189,7 +190,9 @@ func (wb *Workbook) writeCSV(w io.Writer) error {
 		if i < len(c.records) {
 			rec = &c.records[i]
 		}
-		if rec != nil && sameFields(rec.fields, cells) {
+		// An edited row whose fields are back to the original (after an
+		// undo) also gets its original text, quotes and all.
+		if rec != nil && (!c.edited[i] || sameFields(rec.fields, cells)) {
 			b.WriteString(rec.raw)
 		} else {
 			width := len(cells)

@@ -98,6 +98,72 @@ func TestSetInputEscapeLikeText(t *testing.T) {
 	check(reopen(t, wb), "after save")
 }
 
+// TestSetTextSharedStringCollision: excelize looks a new shared string up
+// by its text but files it under its escaped form, so a later string can
+// match an earlier one's key and share its entry. Every text must still
+// read back as typed, in either order and after a save.
+func TestSetTextSharedStringCollision(t *testing.T) {
+	pairs := [][2]string{
+		{"_x0041_", "_x005F_x0041_"},
+		{"_x005F_x0041_", "_x0041_"},
+		{"a_x0041_x0042_", "a_x005F_x0041_x0042_"},
+	}
+	for _, p := range pairs {
+		wb := newWorkbook(t, func(*excelize.File) {})
+		setInput(t, wb, "Sheet1", "A1", p[0])
+		setInput(t, wb, "Sheet1", "A2", p[1])
+		for _, w := range []*Workbook{wb, reopen(t, wb)} {
+			for row, want := range p {
+				if got := w.Value("Sheet1", row, 0); got != want {
+					t.Errorf("%q then %q: row %d shows %q", p[0], p[1], row+1, got)
+				}
+			}
+		}
+	}
+}
+
+// TestSetInputControlChars: characters XML can't hold are stored escaped,
+// so they survive a save instead of turning into U+FFFD. Tab, line feed and
+// carriage return are allowed in XML and kept as they are.
+func TestSetInputControlChars(t *testing.T) {
+	inputs := []string{"a\x01b\x0cc", "\x00", "x\x1f", "￾￿", "tab\there", "line\nbreak", "cr\rhere", "crlf\r\n", "\r"}
+	wb := newWorkbook(t, func(*excelize.File) {})
+	for i, in := range inputs {
+		if err := wb.SetInput("Sheet1", i, 0, in); err != nil {
+			t.Fatalf("SetInput(%q): %v", in, err)
+		}
+	}
+	saved := reopen(t, wb)
+	for i, want := range inputs {
+		if got := saved.Value("Sheet1", i, 0); got != want {
+			t.Errorf("after save: row %d = %q, want %q", i+1, got, want)
+		}
+	}
+	if got := escapeText("tab\tlf\ncr\r"); got != "tab\tlf\ncr\r" {
+		t.Errorf("escapeText changed allowed whitespace: %q", got)
+	}
+}
+
+// TestRestoreEscapedControlChar: a file that stores a control character as
+// _x0001_ gets it back on undo, still escaped.
+func TestRestoreEscapedControlChar(t *testing.T) {
+	wb := withSheetXML(t, `<row r="1"><c r="A1" t="inlineStr"><is><t>a_x0001_b</t></is></c></row>`)
+	if got := wb.Value("Sheet1", 0, 0); got != "a\x01b" {
+		t.Fatalf("A1 shows %q, want a\\x01b", got)
+	}
+	snap, err := wb.Snapshot("Sheet1", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setInput(t, wb, "Sheet1", "A1", "other")
+	if err := wb.Restore("Sheet1", 0, 0, snap); err != nil {
+		t.Fatal(err)
+	}
+	if got := reopen(t, wb).Value("Sheet1", 0, 0); got != "a\x01b" {
+		t.Errorf("after undo and save: %q, want a\\x01b", got)
+	}
+}
+
 func TestSetInputTextLimit(t *testing.T) {
 	wb := openWorkbook(t, "plain.xlsx")
 	setInput(t, wb, "Sheet1", "F1", strings.Repeat("a", maxCellChars))
@@ -105,6 +171,10 @@ func TestSetInputTextLimit(t *testing.T) {
 	tooLong := map[string]string{
 		"ascii": strings.Repeat("a", maxCellChars+1),
 		"emoji": strings.Repeat("😀", maxCellChars/2+1), // two UTF-16 units each
+		// Fits as typed, but escaping makes it 6 longer, and excelize would
+		// cut the escaped text short.
+		"escaped": "_x0041_" + strings.Repeat("b", maxCellChars-7),
+		"control": "\x01" + strings.Repeat("b", maxCellChars-1),
 	}
 	for name, s := range tooLong {
 		if err := wb.SetInput("Sheet1", 0, 6, s); err == nil {
@@ -246,9 +316,91 @@ func TestCSVEscapeLikeText(t *testing.T) {
 }
 
 func TestCSVFieldTooLong(t *testing.T) {
-	path := writeCSVFile(t, "long.csv", "a,"+strings.Repeat("x", maxCellChars+1)+"\n")
-	if wb, err := Open(path); err == nil {
-		_ = wb.Close()
-		t.Fatal("want error for a field over Excel's cell limit")
+	for name, field := range map[string]string{
+		"plain":   strings.Repeat("x", maxCellChars+1),
+		"escaped": "_x0041_" + strings.Repeat("x", maxCellChars-7),
+	} {
+		path := writeCSVFile(t, name+".csv", "a,"+field+"\n")
+		if wb, err := Open(path); err == nil {
+			_ = wb.Close()
+			t.Errorf("%s: want error for a field over Excel's cell limit", name)
+		}
+	}
+}
+
+// TestCSVSharedStringCollision: two fields that collide in excelize's
+// shared-string table still show and save as written.
+func TestCSVSharedStringCollision(t *testing.T) {
+	content := "_x0041_\n_x005F_x0041_\n"
+	path := writeCSVFile(t, "collide.csv", content)
+	wb := openCSVAt(t, path)
+	sheet := wb.Sheets()[0]
+	for row, want := range []string{"_x0041_", "_x005F_x0041_"} {
+		if got := wb.Value(sheet, row, 0); got != want {
+			t.Errorf("row %d shows %q, want %q", row+1, got, want)
+		}
+	}
+	if err := wb.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, path); got != content {
+		t.Errorf("unedited save changed the file: %q", got)
+	}
+}
+
+// TestCSVUneditedRowsCopiedFromFile: a row the user never edited is written
+// from the original file, whatever excelize holds for it.
+func TestCSVUneditedRowsCopiedFromFile(t *testing.T) {
+	content := "\"a\",b\nc,d\n"
+	path := writeCSVFile(t, "rows.csv", content)
+	wb := openCSVAt(t, path)
+	sheet := wb.Sheets()[0]
+	// Change excelize's copy behind the model's back.
+	if err := wb.file.SetCellStr(sheet, "A1", "zzz"); err != nil {
+		t.Fatal(err)
+	}
+	if err := wb.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, path); got != content {
+		t.Errorf("saved %q, want the unedited rows copied: %q", got, content)
+	}
+
+	// An edited row is re-encoded; undoing the edit brings back its
+	// original text, quotes included.
+	setInput(t, wb, sheet, "B2", "e")
+	snap, err := wb.Snapshot(sheet, 0, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setInput(t, wb, sheet, "B1", "x")
+	if err := wb.Restore(sheet, 0, 1, snap); err != nil {
+		t.Fatal(err)
+	}
+	if err := wb.SetInput(sheet, 0, 0, "a"); err != nil { // undo the change made behind its back
+		t.Fatal(err)
+	}
+	if err := wb.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := readFile(t, path), "\"a\",b\nc,e\n"; got != want {
+		t.Errorf("saved %q, want %q", got, want)
+	}
+}
+
+// TestCSVControlCharsToXLSX: a CSV with control characters saved as .xlsx
+// keeps them.
+func TestCSVControlCharsToXLSX(t *testing.T) {
+	path := writeCSVFile(t, "ctrl.csv", "a\x01b,\x0c\n")
+	wb := openCSVAt(t, path)
+	out := filepath.Join(t.TempDir(), "ctrl.xlsx")
+	if err := wb.SaveAs(out); err != nil {
+		t.Fatal(err)
+	}
+	saved := openAt(t, out)
+	for col, want := range []string{"a\x01b", "\x0c"} {
+		if got := saved.Value(saved.Sheets()[0], 0, col); got != want {
+			t.Errorf("column %d = %q, want %q", col, got, want)
+		}
 	}
 }

@@ -62,9 +62,19 @@ func (wb *Workbook) SetInput(sheet string, row, col int, input string) error {
 	if err := restoreGroup(); err != nil {
 		return err
 	}
-	wb.edited = true
-	wb.refreshSheet(sheet)
+	wb.markEdited(sheet, row)
 	return nil
+}
+
+// markEdited records that a cell in row changed: the workbook is edited,
+// the sheet's cached values are dropped, and in a CSV the row is no longer
+// copied from the file on save.
+func (wb *Workbook) markEdited(sheet string, row int) {
+	wb.edited = true
+	if wb.csv != nil {
+		wb.csv.edited[row] = true
+	}
+	wb.refreshSheet(sheet)
 }
 
 // CellSnapshot is a cell's content and style, for undo.
@@ -140,8 +150,7 @@ func (wb *Workbook) Restore(sheet string, row, col int, s CellSnapshot) error {
 	if err := restoreGroup(); err != nil {
 		return err
 	}
-	wb.edited = true
-	wb.refreshSheet(sheet)
+	wb.markEdited(sheet, row)
 	return nil
 }
 
@@ -260,32 +269,105 @@ func (wb *Workbook) restoreISODate(sheet, cell, raw string) error {
 // emoji counts as two).
 const maxCellChars = 32767
 
-// setText stores text exactly. excelize writes text as it is, so typed text
-// like "_x0041_" would be read back (by Excel and by excelize) as "A"; the
-// leading underscore is escaped as "_x005F_" to keep it literal. Text over
-// Excel's limit is refused rather than cut short.
+// setText stores text in a cell exactly (see storeText).
 func (wb *Workbook) setText(sheet, cell, text string) error {
-	if n := utf16Len(text); n > maxCellChars {
-		return fmt.Errorf("text is %d characters long; a cell holds at most %d", n, maxCellChars)
-	}
-	return wb.file.SetCellStr(sheet, cell, escapeText(text))
+	return storeText(wb.file, sheet, cell, text)
 }
 
-// escapeText escapes every "_" that starts an escape-like sequence
-// (_xHHHH_, which the file format reads as one character) as "_x005F_".
-// Matches can overlap: in "_x0041_x0042_" the second one starts at the
-// first one's last "_", so every position is checked, not just those after
-// a previous match.
+// storeText stores text in a cell so it reads back exactly as given:
+//
+//   - escapeText keeps escape-like text literal and escapes characters XML
+//     can't hold.
+//   - The length limit is checked on the escaped text, because that is what
+//     excelize stores, and it cuts text over the limit short without an
+//     error.
+//   - excelize looks a new shared string up by the text it is given, but
+//     files each new entry under its own escaped form of the text
+//     (bstrMarshal). When the two differ, a later text can equal an earlier
+//     text's key, and the cell is pointed at the earlier entry: after
+//     "_x0041_" (stored as "_x005F_x0041_", filed under
+//     "_x005F_x005F_x005F_x0041_"), the text "_x005F_x0041_" (stored as
+//     "_x005F_x005F_x005F_x0041_") gets that entry and reads back as
+//     "_x0041_". Keys only differ for text containing "_x", so that text is
+//     read back, and on a mismatch it is stored as a one-run rich-text
+//     entry, which skips the lookup.
+func storeText(f *excelize.File, sheet, cell, text string) error {
+	stored := escapeText(text)
+	if err := checkStoredLength(stored); err != nil {
+		return err
+	}
+	if err := f.SetCellStr(sheet, cell, stored); err != nil {
+		return err
+	}
+	if !strings.Contains(stored, "_x") {
+		return nil
+	}
+	if ok, err := readsBack(f, sheet, cell, text); err != nil || ok {
+		return err
+	}
+	// A rich-text run goes through excelize's own escaping, which misses
+	// overlapping escape-like text and characters XML can't hold. The first
+	// can be caught by reading back; the second only shows after a save.
+	if strings.IndexFunc(text, func(r rune) bool { return !xmlChar(r) }) >= 0 {
+		return errors.New("this text can't be stored exactly (it contains control characters and text that excelize mixes up with another cell's)")
+	}
+	if err := f.SetCellRichText(sheet, cell, []excelize.RichTextRun{{Text: text}}); err != nil {
+		return err
+	}
+	if ok, err := readsBack(f, sheet, cell, text); err != nil || ok {
+		return err
+	}
+	return errors.New("this text can't be stored exactly (excelize mixes it up with another cell's text)")
+}
+
+// readsBack reports whether a cell holds exactly text.
+func readsBack(f *excelize.File, sheet, cell, text string) (bool, error) {
+	got, err := f.GetCellValue(sheet, cell, excelize.Options{RawCellValue: true})
+	return got == text, err
+}
+
+func checkStoredLength(stored string) error {
+	if n := utf16Len(stored); n > maxCellChars {
+		return fmt.Errorf("text too long: a cell holds at most %d characters, and this text takes %d as stored", maxCellChars, n)
+	}
+	return nil
+}
+
+// escapeText escapes text for a cell, using the file format's _xHHHH_
+// escapes (one UTF-16 unit each):
+//
+//   - Every "_" that starts an escape-like sequence becomes "_x005F_", so
+//     the text stays literal. Sequences can overlap: in "_x0041_x0042_" the
+//     second starts at the first one's last "_", so every position is
+//     checked, not just those after a previous match.
+//   - Characters XML can't hold (control characters other than tab, line
+//     feed and carriage return, U+FFFE and U+FFFF) become _xHHHH_, as the
+//     spec requires; written raw they would turn into U+FFFD on save.
 func escapeText(s string) string {
 	var b strings.Builder
-	for i := 0; i < len(s); i++ {
-		if startsEscape(s[i:]) {
+	for i, r := range s {
+		switch {
+		case startsEscape(s[i:]):
 			b.WriteString("_x005F_")
-			continue
+		case !xmlChar(r):
+			fmt.Fprintf(&b, "_x%04X_", r)
+		default:
+			b.WriteRune(r)
 		}
-		b.WriteByte(s[i])
 	}
 	return b.String()
+}
+
+// xmlChar reports whether XML 1.0 can hold r. Surrogates can't occur in a
+// Go string's runes, so only control characters and U+FFFE/U+FFFF are out.
+func xmlChar(r rune) bool {
+	switch {
+	case r == '\t', r == '\n', r == '\r':
+		return true
+	case r < 0x20, r == 0xFFFE, r == 0xFFFF:
+		return false
+	}
+	return true
 }
 
 // startsEscape reports whether s starts with _xHHHH_.
