@@ -15,16 +15,26 @@ const (
 	maxCols = 16384
 )
 
-// Workbook is an open .xlsx or .xlsm file. For now it is read-only.
+// Workbook is an open .xlsx, .xlsm or .csv file. A CSV is held as a
+// one-sheet workbook whose cells are all text.
 //
 // Rows and columns are 0-based everywhere in this API; A1 is (0, 0).
 // A Workbook is not safe for concurrent use; the UI calls it from its own
 // goroutine only.
 type Workbook struct {
-	path   string
-	file   *excelize.File
-	sheets map[string]sheetData // loaded on first use
-	closed bool
+	path     string
+	file     *excelize.File
+	text     *textStore           // stores text in file's cells
+	sheets   map[string]sheetData // display values, loaded on first use
+	scan     map[string]sheetScan // from the open-time scan
+	csv      *csvFile             // set while the file is a CSV
+	readOnly string               // why it can't be edited or saved; "" if it can
+	edited   bool                 // a cell changed since open
+	closed   bool
+
+	// faultAfterEdit, set only by tests, makes an edit fail after it has
+	// written to the cell.
+	faultAfterEdit func() error
 }
 
 // sheetData is one sheet's display values. Rows have different lengths,
@@ -52,8 +62,7 @@ func openOptions(tmpDir string) excelize.Options {
 	}
 }
 
-// Open opens an .xlsx or .xlsm file. Other extensions (including .csv, which
-// comes in milestone 3) are rejected.
+// Open opens an .xlsx, .xlsm or .csv file. Other extensions are rejected.
 func Open(path string) (*Workbook, error) {
 	return openWith(path, openOptions(""))
 }
@@ -61,10 +70,12 @@ func Open(path string) (*Workbook, error) {
 func openWith(path string, opts excelize.Options) (*Workbook, error) {
 	switch ext := strings.ToLower(filepath.Ext(path)); ext {
 	case ".xlsx", ".xlsm":
+	case ".csv":
+		return openCSV(path)
 	case "":
-		return nil, fmt.Errorf("open %s: unsupported file type (want .xlsx or .xlsm)", path)
+		return nil, fmt.Errorf("open %s: unsupported file type (want .xlsx, .xlsm or .csv)", path)
 	default:
-		return nil, fmt.Errorf("open %s: unsupported file type %s (want .xlsx or .xlsm)", path, ext)
+		return nil, fmt.Errorf("open %s: unsupported file type %s (want .xlsx, .xlsm or .csv)", path, ext)
 	}
 	f, err := excelize.OpenFile(path, opts)
 	if err != nil {
@@ -75,7 +86,8 @@ func openWith(path string, opts excelize.Options) (*Workbook, error) {
 		}
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
-	return &Workbook{path: path, file: f, sheets: map[string]sheetData{}}, nil
+	scan, readOnly := scanSheets(f)
+	return &Workbook{path: path, file: f, text: newTextStore(f), sheets: map[string]sheetData{}, scan: scan, readOnly: readOnly}, nil
 }
 
 // Close releases the file and any temp files excelize made for it. Calling
@@ -137,26 +149,6 @@ func (wb *Workbook) Value(sheet string, row, col int) string {
 		return r[col]
 	}
 	return ""
-}
-
-// Formula returns what the formula bar shows: "=" plus the formula if the
-// cell has one, otherwise the cell's display value.
-func (wb *Workbook) Formula(sheet string, row, col int) (string, error) {
-	cell := CellName(row, col)
-	if cell == "" {
-		return "", fmt.Errorf("cell (%d, %d) is outside the sheet", row, col)
-	}
-	if wb.closed {
-		return "", errors.New("workbook is closed")
-	}
-	formula, err := wb.file.GetCellFormula(sheet, cell)
-	if err != nil {
-		return "", fmt.Errorf("%s!%s: %w", sheet, cell, err)
-	}
-	if formula != "" {
-		return "=" + formula, nil
-	}
-	return wb.Value(sheet, row, col), nil
 }
 
 // load returns the sheet's display values, reading them on first use.

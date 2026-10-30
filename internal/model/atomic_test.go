@@ -173,6 +173,147 @@ func TestWriteFileAtomicNotARegularFile(t *testing.T) {
 	assertOnly(t, dir, "folder.xlsx")
 }
 
+// TestWriteFileAtomicSymlink: saving through a link writes the link's target
+// and keeps the link.
+func TestWriteFileAtomicSymlink(t *testing.T) {
+	dir := t.TempDir()
+	realDir := filepath.Join(dir, "real")
+	if err := os.Mkdir(realDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(realDir, "book.xlsx")
+	if err := os.WriteFile(target, []byte("old"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link.xlsx")
+	if err := os.Symlink(filepath.Join("real", "book.xlsx"), link); err != nil {
+		t.Skipf("can't make symlinks here: %v", err)
+	}
+
+	if err := writeFileAtomic(link, writeString("new")); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&fs.ModeSymlink == 0 {
+		t.Fatal("the link was replaced by a regular file")
+	}
+	if got, err := os.Readlink(link); err != nil || got != filepath.Join("real", "book.xlsx") {
+		t.Errorf("link now points to %q (%v)", got, err)
+	}
+	assertFile(t, target, "new")
+	assertMode(t, target, 0o640)
+	assertOnly(t, dir, "link.xlsx", "real")
+	assertOnly(t, realDir, "book.xlsx") // the temp file was made beside the target
+}
+
+func TestWriteFileAtomicBrokenSymlink(t *testing.T) {
+	dir := t.TempDir()
+	link := filepath.Join(dir, "link.xlsx")
+	if err := os.Symlink(filepath.Join(dir, "missing.xlsx"), link); err != nil {
+		t.Skipf("can't make symlinks here: %v", err)
+	}
+	if err := writeFileAtomic(link, writeString("new")); err == nil {
+		t.Fatal("want error for a link whose target is missing")
+	}
+	assertOnly(t, dir, "link.xlsx")
+}
+
+func TestWriteFileAtomicReadOnlyFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "book.xlsx")
+	if err := os.WriteFile(path, []byte("old"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0o600) }) // so TempDir can be removed on Windows
+
+	called := false
+	err := writeFileAtomic(path, func(io.Writer) error { called = true; return nil })
+	if !errors.Is(err, ErrReadOnly) {
+		t.Fatalf("err = %v, want ErrReadOnly", err)
+	}
+	if called {
+		t.Error("write was called for a read-only file")
+	}
+	assertFile(t, path, "old")
+	assertMode(t, path, 0o444)
+	assertOnly(t, dir, "book.xlsx")
+}
+
+// TestWriteFileAtomicReadOnlyFolder: a folder we can't write (like a
+// write-protected USB stick) also reports ErrReadOnly.
+func TestWriteFileAtomicReadOnlyFolder(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("folder permissions work differently on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores folder permissions")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "book.xlsx")
+	if err := os.WriteFile(path, []byte("old"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	err := writeFileAtomic(path, writeString("new"))
+	if !errors.Is(err, ErrReadOnly) {
+		t.Fatalf("err = %v, want ErrReadOnly", err)
+	}
+	assertFile(t, path, "old")
+}
+
+// failSync makes the folder sync after the rename fail.
+func failSync(t *testing.T) {
+	t.Helper()
+	old := syncDirFunc
+	syncDirFunc = func(string) error { return errors.New("sync failed (simulated)") }
+	t.Cleanup(func() { syncDirFunc = old })
+}
+
+// TestWriteFileAtomicFolderSyncFails: a failed folder sync after the rename
+// still means the file was saved, and the error says so.
+func TestWriteFileAtomicFolderSyncFails(t *testing.T) {
+	failSync(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "book.xlsx")
+	if err := writeFileAtomic(path, writeString("new")); !errors.Is(err, ErrSavedNotSynced) {
+		t.Fatalf("err = %v, want ErrSavedNotSynced", err)
+	}
+	assertFile(t, path, "new")
+	assertOnly(t, dir, "book.xlsx")
+}
+
+// TestSaveAsFolderSyncFails: SaveAs reports the sync warning but treats the
+// file as saved, so the workbook moves to the new path.
+func TestSaveAsFolderSyncFails(t *testing.T) {
+	for _, name := range []string{"plain.xlsx", "plain.csv"} {
+		t.Run(name, func(t *testing.T) {
+			wb := openAt(t, copyFixture(t, name))
+			setInput(t, wb, wb.file.GetSheetList()[0], "A1", "edited")
+			failSync(t)
+			path := filepath.Join(t.TempDir(), "out"+filepath.Ext(name))
+			if err := wb.SaveAs(path); !errors.Is(err, ErrSavedNotSynced) {
+				t.Fatalf("err = %v, want ErrSavedNotSynced", err)
+			}
+			if wb.Path() != path {
+				t.Errorf("Path() = %q, want %q", wb.Path(), path)
+			}
+			if _, err := os.Stat(path); err != nil {
+				t.Errorf("saved file missing: %v", err)
+			}
+		})
+	}
+}
+
 func TestWriteFileAtomicMissingFolder(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "no-such-folder", "book.xlsx")
 	if err := writeFileAtomic(path, writeString("x")); err == nil {

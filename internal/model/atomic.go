@@ -23,15 +23,23 @@ import (
 //
 // If any step up to the rename fails, the temp file is removed and the
 // original is untouched.
+//
+// If path is a symlink, the link's target is written and the link is kept.
+// A read-only target, or a folder we can't write, gives an error that
+// matches ErrReadOnly, before anything is written.
 func writeFileAtomic(path string, write func(w io.Writer) error) (err error) {
-	mode, err := targetMode(path)
+	target, err := resolveTarget(path)
 	if err != nil {
 		return fmt.Errorf("save %s: %w", path, err)
 	}
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*.tmp")
+	mode, err := targetMode(target)
 	if err != nil {
 		return fmt.Errorf("save %s: %w", path, err)
+	}
+	dir := filepath.Dir(target)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(target)+".*.tmp")
+	if err != nil {
+		return fmt.Errorf("save %s: %w", path, readOnlyIfDenied(err))
 	}
 	tmpName := tmp.Name()
 	closed, renamed := false, false
@@ -58,21 +66,55 @@ func writeFileAtomic(path string, write func(w io.Writer) error) (err error) {
 	if err := os.Chmod(tmpName, mode); err != nil {
 		return fmt.Errorf("save %s: %w", path, err)
 	}
-	if err := os.Rename(tmpName, path); err != nil {
-		return fmt.Errorf("save %s: %w", path, err)
+	if err := os.Rename(tmpName, target); err != nil {
+		return fmt.Errorf("save %s: %w", path, readOnlyIfDenied(err))
 	}
 	renamed = true
 	// The new file is in place now. A failed folder sync only means the
-	// rename might not survive a power cut yet, so report it but keep going.
-	if err := syncDir(dir); err != nil {
-		return fmt.Errorf("saved %s, but syncing its folder failed: %w", path, err)
+	// rename might not survive a power cut yet: the save happened, so the
+	// error matches ErrSavedNotSynced and callers treat the file as saved.
+	if err := syncDirFunc(dir); err != nil {
+		return fmt.Errorf("saved %s, but %w: %w", path, ErrSavedNotSynced, err)
 	}
 	return nil
+}
+
+// ErrSavedNotSynced means the file was saved but its folder couldn't be
+// flushed to disk, so a power cut right now might undo the save.
+var ErrSavedNotSynced = errors.New("the folder couldn't be flushed to disk")
+
+// syncDirFunc is syncDir, swappable in tests.
+var syncDirFunc = syncDir
+
+// ErrReadOnly means the file (or its folder) can't be written. The UI offers
+// Save As instead.
+var ErrReadOnly = errors.New("file is read-only")
+
+// resolveTarget returns the file to write: path itself, or the target of a
+// symlink, so saving writes through the link and keeps it. A link whose
+// target is missing is an error.
+func resolveTarget(path string) (string, error) {
+	info, err := os.Lstat(path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return path, nil
+	case err != nil:
+		return "", err
+	case info.Mode()&fs.ModeSymlink == 0:
+		return path, nil
+	}
+	target, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", fmt.Errorf("follow symlink: %w", err)
+	}
+	return target, nil
 }
 
 // targetMode returns the permissions the saved file should get: the
 // original's if it exists, otherwise what a normal new file gets.
 // (excelize's own SaveAs would make new files executable: 0777 minus umask.)
+// A read-only original gives ErrReadOnly: on Linux the rename would replace
+// it anyway, because a rename only needs a writable folder.
 func targetMode(path string) (fs.FileMode, error) {
 	info, err := os.Stat(path)
 	switch {
@@ -82,8 +124,19 @@ func targetMode(path string) (fs.FileMode, error) {
 		return 0, err
 	case !info.Mode().IsRegular():
 		return 0, errors.New("not a regular file")
+	case !fileWritable(path, info):
+		return 0, ErrReadOnly
 	}
 	return info.Mode().Perm(), nil
+}
+
+// readOnlyIfDenied makes a permission error, or a write-protected disk
+// (like a USB stick with its lock switch on), also match ErrReadOnly.
+func readOnlyIfDenied(err error) error {
+	if errors.Is(err, fs.ErrPermission) || isWriteProtected(err) {
+		return fmt.Errorf("%w: %w", ErrReadOnly, err)
+	}
+	return err
 }
 
 // removeTemp deletes a leftover temp file. On Windows a read-only file

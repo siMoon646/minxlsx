@@ -109,8 +109,8 @@ func TestViewerFailedOpenKeepsFile(t *testing.T) {
 	if err := v.Open(fixture("does-not-exist.xlsx")); err == nil {
 		t.Fatal("want error")
 	}
-	if err := v.Open(fixture("plain.csv")); err == nil {
-		t.Fatal("want error for .csv")
+	if err := v.Open(fixture("README.md")); err == nil {
+		t.Fatal("want error for an unsupported file type")
 	}
 	if got := v.FileName(); got != "plain.xlsx" {
 		t.Errorf("FileName() = %q after failed open, want plain.xlsx", got)
