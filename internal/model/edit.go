@@ -75,30 +75,31 @@ func (wb *Workbook) setInput(sheet string, row, col int, input string) error {
 			return err // refused before anything changed
 		}
 	}
-	before, err := wb.Snapshot(sheet, row, col)
-	if err != nil {
-		return err
-	}
-	err = wb.change(sheet, cell, row, func() error { return wb.apply(sheet, cell, in) })
-	if err != nil {
-		// Put the cell back as it was, as far as possible.
-		if rerr := wb.change(sheet, cell, row, func() error { return wb.restoreCell(sheet, cell, before) }); rerr != nil {
-			err = errors.Join(err, fmt.Errorf("putting the cell back also failed: %w", rerr))
-		}
-	}
-	return err
+	return wb.change(sheet, cell, row, func() error { return wb.apply(sheet, cell, in) })
 }
 
 // change runs an edit of one cell. It keeps a shared-formula group intact
-// around it (see unshare), even if the edit fails partway. Even a failed
-// edit may have changed the cell, so the sheet's cached values are dropped
-// and the workbook counts as edited either way.
+// around it (see unshare), even if the edit fails partway. If the edit
+// fails after changing the cell, the cell is put back as it was, as far as
+// restoreCell can; if it failed before changing anything, the cell is left
+// alone, so nothing a snapshot can't hold is lost. The sheet's cached values
+// are dropped and the workbook counts as edited either way.
 func (wb *Workbook) change(sheet, cell string, row int, edit func() error) error {
+	before, err := wb.snapshotCell(sheet, cell)
+	if err != nil {
+		return err
+	}
 	restoreGroup, err := wb.unshare(sheet, cell)
 	if err != nil {
 		return err
 	}
 	err = edit()
+	if err == nil && wb.faultAfterEdit != nil {
+		err = wb.faultAfterEdit()
+	}
+	if err != nil {
+		err = wb.putBack(sheet, cell, before, err)
+	}
 	if gerr := restoreGroup(); gerr != nil {
 		err = errors.Join(err, gerr)
 	}
@@ -107,6 +108,19 @@ func (wb *Workbook) change(sheet, cell string, row int, edit func() error) error
 		return fmt.Errorf("%s!%s: %w", sheet, cell, err)
 	}
 	return nil
+}
+
+// putBack puts a cell back to before after an edit failed with err, unless
+// the cell still matches before. It returns err, joined with any error from
+// putting the cell back.
+func (wb *Workbook) putBack(sheet, cell string, before CellSnapshot, err error) error {
+	if now, serr := wb.snapshotCell(sheet, cell); serr == nil && now == before {
+		return err
+	}
+	if rerr := wb.restoreCell(sheet, cell, before); rerr != nil {
+		return errors.Join(err, fmt.Errorf("putting the cell back also failed: %w", rerr))
+	}
+	return err
 }
 
 // markEdited records that a cell in row changed: the workbook is edited,
@@ -271,7 +285,13 @@ func (wb *Workbook) Snapshot(sheet string, row, col int) (CellSnapshot, error) {
 	if err != nil {
 		return CellSnapshot{}, err
 	}
+	return wb.snapshotCell(sheet, cell)
+}
+
+// snapshotCell is Snapshot for a cell given by name.
+func (wb *Workbook) snapshotCell(sheet, cell string) (CellSnapshot, error) {
 	var s CellSnapshot
+	var err error
 	if s.formula, err = wb.file.GetCellFormula(sheet, cell); err != nil {
 		return CellSnapshot{}, err
 	}
@@ -513,18 +533,23 @@ func checkStoredLength(stored string) error {
 // escapeText escapes text for a cell, using the file format's _xHHHH_
 // escapes (one UTF-16 unit each):
 //
-//   - Every "_" that starts an escape-like sequence becomes "_x005F_", so
-//     the text stays literal. Sequences can overlap: in "_x0041_x0042_" the
-//     second starts at the first one's last "_", so every position is
-//     checked, not just those after a previous match.
+//   - Every "_" followed by "x" and four hex digits becomes "_x005F_",
+//     whatever comes next, so the text stays literal. Checking for the
+//     closing "_" isn't enough: in "_x0041\x01" the control character
+//     becomes "_x0001_", whose "_" would close the escape. Escaping more
+//     than needed is safe, since "_x005F_" always reads back as "_".
 //   - Characters XML can't hold (control characters other than tab, line
 //     feed and carriage return, U+FFFE and U+FFFF) become _xHHHH_, as the
 //     spec requires; written raw they would turn into U+FFFD on save.
+//
+// The result reads back as s: an escape in it can only start at an
+// escape this function wrote, because every other "_" is followed by
+// something other than "x" and four hex digits.
 func escapeText(s string) string {
 	var b strings.Builder
 	for i, r := range s {
 		switch {
-		case startsEscape(s[i:]):
+		case escapePrefix(s[i:]):
 			b.WriteString("_x005F_")
 		case !xmlChar(r):
 			fmt.Fprintf(&b, "_x%04X_", r)
@@ -547,9 +572,9 @@ func xmlChar(r rune) bool {
 	return true
 }
 
-// startsEscape reports whether s starts with _xHHHH_.
-func startsEscape(s string) bool {
-	if len(s) < 7 || s[0] != '_' || s[1] != 'x' || s[6] != '_' {
+// escapePrefix reports whether s starts with "_x" and four hex digits.
+func escapePrefix(s string) bool {
+	if len(s) < 6 || s[0] != '_' || s[1] != 'x' {
 		return false
 	}
 	for _, c := range s[2:6] {

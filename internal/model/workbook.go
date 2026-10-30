@@ -30,6 +30,10 @@ type Workbook struct {
 	readOnly string               // why it can't be edited or saved; "" if it can
 	edited   bool                 // a cell changed since open
 	closed   bool
+
+	// faultAfterEdit, set only by tests, makes an edit fail after it has
+	// written to the cell.
+	faultAfterEdit func() error
 }
 
 // sheetData is one sheet's display values. Rows have different lengths,
