@@ -116,6 +116,11 @@ One window with a menu bar and four strips top to bottom, no ribbon or sidebars.
 - **Line breaks:** the formula bar keeps line breaks already in a cell. Typing new ones isn't supported yet.
 - **Grid keys:** in the grid, arrows move the selection, Enter moves down, Tab / Shift+Tab move right/left, and Delete or Backspace clears the cell.
 - **Merged cells:** editing a cell inside a merged range edits the range's top-left cell, the only one Excel shows.
+- **What the formula bar shows** (`model.EditText`): text that recreates the cell when typed back in, not the formatted value the grid shows:
+  - a number shows its stored value (`0.123456`, not `0.12`)
+  - a date or time shows as `yyyy-mm-dd[ hh:mm[:ss]]` when that gives back the exact same number; otherwise the number shows
+  - text that would be read as something else gets a leading `'` (`'123`, `'=x`, `'TRUE`)
+- **Unchanged commits:** committing the formula bar's text unchanged changes nothing and doesn't mark the file unsaved. That keeps a formula's cached value, and a number with more digits than can be typed (over 15, like `0.30000000000000004`), which would otherwise come back as text.
 - **Save As:** a small form with a folder picker and a file-name field, with its own "overwrite?" confirm. Fyne's file-save dialog calls `os.Create` on the chosen file before handing it back, which empties an existing file before the atomic save even starts, so it isn't used.
 
 **How typed text is stored** (.xlsx/.xlsm; in a .csv everything is stored exactly as typed):
@@ -133,10 +138,21 @@ One window with a menu bar and four strips top to bottom, no ribbon or sidebars.
 - **Numbers that stay text:** anything that would change if stored as a number. That means leading zeros (`007`), a leading `+`, more than 15 significant digits (Excel's precision), and values out of range.
 - **Dates are timezone-free:** they are parsed as plain dates in UTC, so the local timezone can never shift them by hours.
 - **1904 date system:** in a workbook that counts dates from 1904 (old Mac Excel), dates get that system's serial numbers, and a date before 1904 stays text, since Excel would show it as `####`.
-- **Text is stored exactly:** text like `_x0041_`, which the file format would read back as `A`, is escaped so it stays as typed. Text over Excel's limit of 32,767 characters per cell is refused, not cut short; a CSV with a longer field is refused on open.
-- **Date formatting:** a cell that already has a date or time format keeps it. Otherwise the cell keeps its style (font, fill, borders) and gets `yyyy-mm-dd` (or `yyyy-mm-dd hh:mm[:ss]`) as its number format.
+- **Text is stored exactly:**
+  - Text like `_x0041_`, which the file format would read back as `A`, is escaped so it stays as typed.
+  - Control characters XML can't hold (all below U+0020 except tab, line feed and carriage return, plus U+FFFE and U+FFFF) are stored as `_xHHHH_` escapes, as the spec requires. Written raw, they would turn into `�` on save.
+  - Text over Excel's limit of 32,767 characters per cell is refused, not cut short. The limit is checked on the text as stored, escapes included, because excelize cuts longer text without an error. A CSV with a longer field is refused on open.
+  - Text containing `_x` is read back after it is stored. excelize looks up a new shared string by its text but files it under its own escaped form, so one text can be pointed at another's entry (e.g. `_x005F_x0041_` after `_x0041_`). On a mismatch the text is stored as its own rich-text entry; if that can't hold it exactly either, the edit is refused.
+- **Date formatting:** a cell that already has a date or time format keeps it. Otherwise the cell keeps its style (font, fill, borders) and gets `yyyy-mm-dd` (or `yyyy-mm-dd hh:mm[:ss]`) as its number format. Known limit: excelize makes the new format a new cell format, so the cell loses its link to a named cell style (like "Heading 1") and its "quote prefix" flag; the look stays the same.
 
 **Undo:** every edit is a command on an undo stack from milestone 3, as CLAUDE.md requires. Milestone 4 adds the Undo/Redo buttons and Ctrl+Z/Y. Unsaved state is "the stack isn't where it was at the last save", so undoing back to the saved state counts as clean.
+- An edit that fails partway puts the cell back as it was, and a shared-formula group keeps its formulas either way.
+- Known limits of undo (`Restore`) for dates some apps store as ISO text (`t="d"`) instead of a number. They come back as the same date, stored as a number, except:
+  - a date with a timezone offset is converted to UTC, so its time shifts
+  - a time without a date comes back as text
+  - in a 1904-based workbook, a date before 1904 comes back as a negative number
+
+  Excel itself never writes `t="d"`.
 
 ## File fidelity and data safety
 
@@ -153,6 +169,13 @@ The app must never silently destroy a user's file. excelize keeps most workbook 
   6. Sync the folder (Linux; Windows has no folder sync).
 
   If any step before the rename fails, the temp file is removed and the original is untouched. Tests check that a failed write leaves the original's bytes and permissions as they were, with no temp file left. If only step 6 fails, the file is saved: the error matches `ErrSavedNotSynced`, the workbook counts as saved, and the UI shows it as a warning.
+
+  Known limit: the saved file is a new file renamed into place, so only its permissions are copied from the original. These are lost:
+  - hard links (the other names keep the old content)
+  - the owner and group, if the user saving isn't the owner
+  - ACLs and extended attributes
+  - Windows alternate data streams, including the "downloaded from the internet" mark
+- **Files open in another program (Windows):** Excel locks a file it has open, so the rename fails with "access denied", which MinXLSX currently reports as read-only. A sharing violation (`ERROR_SHARING_VIOLATION`) isn't recognised at all. Known limit: the UI should say "the file is open in another program" instead; to do in milestone 6.
 - **Read-only files:** saving over a read-only file (no owner-write permission, or the Windows read-only flag) is refused before anything is written, even when running as root. On Linux the OS is also asked whether the file is writable, which covers files owned by someone else. The app then offers Save As. A permission error from the folder, or a write-protected disk (for example a USB stick with its lock switch on), gets the same offer. On Linux a rename only needs a writable folder, so without this check a read-only file would be replaced silently.
 - **Symlinks:** saving through a symlink writes to the link's target (temp file in the target's folder, the target's permissions) and keeps the link. A link whose target is missing is an error.
 - **Save As keeps the file type:** .xlsx saves as .xlsx and .xlsm as .xlsm, because switching would change or drop the macro part. A .csv can be saved as .csv or .xlsx.
@@ -162,11 +185,11 @@ The app must never silently destroy a user's file. excelize keeps most workbook 
 - **Stale formula values:** MinXLSX has no calculation engine yet (formula evaluation is "Later"). After an edit, formulas that depend on the edited cell keep showing their old value in MinXLSX, and a newly typed formula shows no value until the file is recalculated. Saving after an edit sets the workbook's `fullCalcOnLoad` flag, so Excel and LibreOffice recalculate everything when they open the file.
 - **CSV files:** MinXLSX uses its own small CSV reader and writer, because Go's `encoding/csv` skips blank lines and rewrites line breaks inside cells.
   - Every cell is text, exactly as written, so "007" and "1.50" never change.
-  - Every row the user didn't change is written back exactly as it was read: same quoting, same line ending, trailing empty fields and blank lines included. Changed or new rows are re-encoded, with quotes only where needed and the file's usual line ending. The BOM and the final newline (or its absence) are kept.
+  - Every row the user didn't change is written back exactly as it was read: same quoting, same line ending, trailing empty fields and blank lines included. The model tracks which rows were edited and copies the others from the file, without asking excelize what it holds for them. An edited row that is back to its original fields (after an undo) gets its original text back too. Changed or new rows are re-encoded, with quotes only where needed and the file's usual line ending. The BOM and the final newline (or its absence) are kept.
   - An unedited CSV saves back byte-for-byte. That's tested on both CSV fixtures and on a deliberately messy file (unneeded quotes, unquoted leading spaces, mixed line endings, blank lines, no final newline).
   - Only UTF-8 is accepted; other encodings are refused on open rather than garbled.
 - **Backup on first save:** keep `name.xlsx.bak` from the session's first save.
-- **Formulas stay formulas:** the grid shows the cached value (`GetCellValue`); the formula bar shows the formula (`GetCellFormula`). Both come from one load.
+- **Formulas stay formulas:** the grid shows the cached value (`GetCellValue`); the formula bar shows the formula (`GetCellFormula`, through `EditText`). Both come from one load.
 - **Macro files:** open .xlsm and save back as .xlsm, keeping the macro part untouched.
 - **Large files:** use excelize's row iterator to load big sheets in pages instead of all at once.
 
@@ -207,6 +230,7 @@ Seven milestones, each sized for one or two Claude Code sessions and ending with
 5. **Structure edits:** insert/delete rows and columns, add/rename/delete/reorder sheets, unhide hidden sheets
 6. **Safety:** risky-content warning, `.bak` backup, paged loading for large files
    - Paged loading must not bring back excelize's temp files in the OS temp folder (see milestone 2); point `Options.TmpDir` beside the executable if it needs them.
+   - From the milestone 3a review: on Windows, report a file open in another program (access denied on rename, `ERROR_SHARING_VIOLATION`) as such, not as read-only (see "Files open in another program" above). Also see issue #7: saving in OneDrive folders may be refused as "not a regular file".
 7. **Portable release:** app icon, settings beside the executable, README, test both builds from a real USB stick
    - From the milestone 1 review:
      - Never use Fyne's Preferences API. Once `fyne package` (or a `FyneApp.toml`) gives the app an ID, Fyne stores preferences in the user's config folder (e.g. `%APPDATA%`), which breaks portability. Add a test that settings are only written to `./settings/`. Fyne's file dialog also writes preferences (last folder, view layout), so that test must open a file dialog too.
