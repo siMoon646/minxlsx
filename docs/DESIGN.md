@@ -117,10 +117,12 @@ One window with a menu bar and four strips top to bottom, no ribbon or sidebars.
 - **Grid keys:** in the grid, arrows move the selection, Enter moves down, Tab / Shift+Tab move right/left, and Delete or Backspace clears the cell.
 - **Merged cells:** editing a cell inside a merged range edits the range's top-left cell, the only one Excel shows.
 - **What the formula bar shows** (`model.EditText`): text that recreates the cell when typed back in, not the formatted value the grid shows:
-  - a number shows its stored value (`0.123456`, not `0.12`)
+  - a number shows its stored value (`0.123456`, not `0.12`), or its shortest form when the stored value has too many digits to type (excelize stores 1e20 as `100000000000000000000`, which shows as `1E+20`)
   - a date or time shows as `yyyy-mm-dd[ hh:mm[:ss]]` when that gives back the exact same number; otherwise the number shows
   - text that would be read as something else gets a leading `'` (`'123`, `'=x`, `'TRUE`)
-- **Unchanged commits:** committing the formula bar's text unchanged changes nothing and doesn't mark the file unsaved. That keeps a formula's cached value, and a number with more digits than can be typed (over 15, like `0.30000000000000004`), which would otherwise come back as text.
+  - a number whose cell style can't be read (e.g. a style id past the end of the style table) shows as a plain number
+- **When the text isn't known:** if `EditText` returns an error, the formula bar (3b) must not commit. An empty or stale text would overwrite the cell.
+- **Unchanged commits:** committing the formula bar's text unchanged changes nothing and doesn't mark the file unsaved. That keeps a formula's cached value, and a number that needs more than 15 digits even in its shortest form (like `0.30000000000000004`), which would otherwise come back as text.
 - **Save As:** a small form with a folder picker and a file-name field, with its own "overwrite?" confirm. Fyne's file-save dialog calls `os.Create` on the chosen file before handing it back, which empties an existing file before the atomic save even starts, so it isn't used.
 
 **How typed text is stored** (.xlsx/.xlsm; in a .csv everything is stored exactly as typed):
@@ -139,14 +141,14 @@ One window with a menu bar and four strips top to bottom, no ribbon or sidebars.
 - **Dates are timezone-free:** they are parsed as plain dates in UTC, so the local timezone can never shift them by hours.
 - **1904 date system:** in a workbook that counts dates from 1904 (old Mac Excel), dates get that system's serial numbers, and a date before 1904 stays text, since Excel would show it as `####`.
 - **Text is stored exactly:**
-  - Text like `_x0041_`, which the file format would read back as `A`, is escaped so it stays as typed.
+  - Text like `_x0041_`, which the file format would read back as `A`, is escaped so it stays as typed. Every `_` followed by `x` and four hex digits is escaped, closing `_` or not: in `_x0041` followed by a control character, the control character's own escape would supply the `_`. Escaping more than needed is safe, since `_x005F_` always reads back as `_`. A fuzz test (`FuzzSetText`) checks that any text reads back exactly, before and after a save.
   - Control characters XML can't hold (all below U+0020 except tab, line feed and carriage return, plus U+FFFE and U+FFFF) are stored as `_xHHHH_` escapes, as the spec requires. Written raw, they would turn into `�` on save.
   - Text over Excel's limit of 32,767 characters per cell is refused, not cut short. The limit is checked on the text as stored, escapes included, because excelize cuts longer text without an error. A CSV with a longer field is refused on open.
-  - Text containing `_x` is read back after it is stored. excelize looks up a new shared string by its text but files it under its own escaped form, so one text can be pointed at another's entry (e.g. `_x005F_x0041_` after `_x0041_`). On a mismatch the text is stored as its own rich-text entry; if that can't hold it exactly either, the edit is refused.
+  - Text containing `_x` is read back after it is stored. excelize looks up a new shared string by its text but files it under its own escaped form, so one text can be pointed at another's entry (e.g. `_x005F_x0041_` after `_x0041_`). On a mismatch the text is stored as its own rich-text entry; if that can't hold it exactly either, the edit is refused and the cell is left as it was. A CSV field that can't be stored exactly makes the CSV refuse to open. With the escaping above, no text is known to reach either refusal; they are a safety net.
 - **Date formatting:** a cell that already has a date or time format keeps it. Otherwise the cell keeps its style (font, fill, borders) and gets `yyyy-mm-dd` (or `yyyy-mm-dd hh:mm[:ss]`) as its number format. Known limit: excelize makes the new format a new cell format, so the cell loses its link to a named cell style (like "Heading 1") and its "quote prefix" flag; the look stays the same.
 
 **Undo:** every edit is a command on an undo stack from milestone 3, as CLAUDE.md requires. Milestone 4 adds the Undo/Redo buttons and Ctrl+Z/Y. Unsaved state is "the stack isn't where it was at the last save", so undoing back to the saved state counts as clean.
-- An edit that fails partway puts the cell back as it was, and a shared-formula group keeps its formulas either way.
+- An edit that fails before changing the cell (e.g. when the workbook's table of cell formats is full) leaves the cell untouched. One that fails after changing it puts the cell back as far as `Restore` can: rich-text formatting, a formula's cached value, `t="d"` dates (see below) and error constants like `#N/A` (which come back as text) are not kept. A shared-formula group keeps its formulas either way.
 - Known limits of undo (`Restore`) for dates some apps store as ISO text (`t="d"`) instead of a number. They come back as the same date, stored as a number, except:
   - a date with a timezone offset is converted to UTC, so its time shifts
   - a time without a date comes back as text
@@ -228,6 +230,7 @@ Seven milestones, each sized for one or two Claude Code sessions and ending with
    - Decided: saving over a read-only file refuses and offers Save As; saving through a symlink writes to the link's target and keeps the link (see "Read-only files" and "Symlinks" above).
 4. **Undo/redo:** Undo/Redo buttons and Ctrl+Z/Y on the undo stack from milestone 3, and commands for the structure edits
 5. **Structure edits:** insert/delete rows and columns, add/rename/delete/reorder sheets, unhide hidden sheets
+   - From the milestone 3a review: in a CSV, inserting or deleting rows must shift the model's edited-row marks (`csvFile.edited`) and the original records in step, or saving would copy the wrong rows from the file.
 6. **Safety:** risky-content warning, `.bak` backup, paged loading for large files
    - Paged loading must not bring back excelize's temp files in the OS temp folder (see milestone 2); point `Options.TmpDir` beside the executable if it needs them.
    - From the milestone 3a review: on Windows, report a file open in another program (access denied on rename, `ERROR_SHARING_VIOLATION`) as such, not as read-only (see "Files open in another program" above). Also see issue #7: saving in OneDrive folders may be refused as "not a regular file".
