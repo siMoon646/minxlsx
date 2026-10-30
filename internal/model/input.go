@@ -23,7 +23,7 @@ const (
 // cellInput is parsed typed text. Only the field for its kind is set.
 type cellInput struct {
 	kind   inputKind
-	text   string    // inputText; inputFormula (without the leading "=")
+	text   string    // inputText; inputFormula (without the leading "="); inputDate: as typed
 	b      bool      // inputBool
 	num    float64   // inputNumber
 	t      time.Time // inputDate, always UTC
@@ -70,7 +70,7 @@ func parseInput(s string) cellInput {
 		// zone offset would shift it by hours.
 		t, err := time.ParseInLocation(d.layout, s, time.UTC)
 		if err == nil && t.Year() >= 1900 {
-			return cellInput{kind: inputDate, t: t, numFmt: d.numFmt}
+			return cellInput{kind: inputDate, text: s, t: t, numFmt: d.numFmt}
 		}
 	}
 	return cellInput{kind: inputText, text: s}
@@ -97,7 +97,9 @@ func parseNumber(s string) (float64, bool) {
 	if err != nil || math.IsInf(n, 0) {
 		return 0, false
 	}
-	if n == 0 && strings.HasPrefix(s, "-") { // "-0" would come back as "0"
+	if n == 0 && (strings.HasPrefix(s, "-") || digits != "") {
+		// "-0" would come back as "0", and a tiny number like 1e-400
+		// underflows to 0.
 		return 0, false
 	}
 	return n, true

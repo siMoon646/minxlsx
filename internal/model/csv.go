@@ -69,7 +69,10 @@ func openCSV(path string) (*Workbook, error) {
 			if field == "" {
 				continue
 			}
-			if err := f.SetCellStr(sheet, CellName(r, c), field); err != nil {
+			if n := utf16Len(field); n > maxCellChars {
+				return fail(fmt.Errorf("row %d, field %d is %d characters long; a cell holds at most %d", r+1, c+1, n, maxCellChars))
+			}
+			if err := f.SetCellStr(sheet, CellName(r, c), escapeText(field)); err != nil {
 				return fail(fmt.Errorf("row %d: %w", r+1, err))
 			}
 		}

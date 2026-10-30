@@ -54,12 +54,14 @@ func TestParseInput(t *testing.T) {
 		{"NaN", cellInput{kind: inputText, text: "NaN"}},
 		{"0x10", cellInput{kind: inputText, text: "0x10"}},
 		{"1_000", cellInput{kind: inputText, text: "1_000"}},
+		{"1e-400", cellInput{kind: inputText, text: "1e-400"}}, // underflows to 0
+		{"0.0", cellInput{kind: inputNumber, num: 0}},
 
 		// Dates, always UTC.
-		{"2024-03-15", cellInput{kind: inputDate, t: date(2024, 3, 15, 0, 0, 0), numFmt: "yyyy-mm-dd"}},
-		{"2024-03-15 13:45", cellInput{kind: inputDate, t: date(2024, 3, 15, 13, 45, 0), numFmt: "yyyy-mm-dd hh:mm"}},
-		{"2024-03-15 13:45:30", cellInput{kind: inputDate, t: date(2024, 3, 15, 13, 45, 30), numFmt: "yyyy-mm-dd hh:mm:ss"}},
-		{"9999-12-31", cellInput{kind: inputDate, t: date(9999, 12, 31, 0, 0, 0), numFmt: "yyyy-mm-dd"}},
+		{"2024-03-15", cellInput{kind: inputDate, text: "2024-03-15", t: date(2024, 3, 15, 0, 0, 0), numFmt: "yyyy-mm-dd"}},
+		{"2024-03-15 13:45", cellInput{kind: inputDate, text: "2024-03-15 13:45", t: date(2024, 3, 15, 13, 45, 0), numFmt: "yyyy-mm-dd hh:mm"}},
+		{"2024-03-15 13:45:30", cellInput{kind: inputDate, text: "2024-03-15 13:45:30", t: date(2024, 3, 15, 13, 45, 30), numFmt: "yyyy-mm-dd hh:mm:ss"}},
+		{"9999-12-31", cellInput{kind: inputDate, text: "9999-12-31", t: date(9999, 12, 31, 0, 0, 0), numFmt: "yyyy-mm-dd"}},
 		{"1899-12-31", cellInput{kind: inputText, text: "1899-12-31"}}, // before Excel's first date
 		{"2024-02-30", cellInput{kind: inputText, text: "2024-02-30"}},
 		{"15/03/2024", cellInput{kind: inputText, text: "15/03/2024"}}, // day/month order depends on locale

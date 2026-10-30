@@ -19,6 +19,15 @@ type sheetScan struct {
 	// holds the formula text the group reuses) to the group's range, e.g.
 	// "A2" -> "A2:A41". Editing a master needs care: see unshare.
 	masters map[string]string
+	// masterGroup maps a master cell to its group id (the si attribute),
+	// and groups maps a group id to the other cells using it. excelize
+	// clears every cell with the master's id, inside its range or not.
+	masterGroup map[string]string
+	groups      map[string][]string
+	// locked lists the ranges of array and data-table formulas. Like
+	// Excel, MinXLSX doesn't let one cell of such a range be edited on
+	// its own.
+	locked []string
 }
 
 // scanSheets reads every worksheet's raw XML once, before excelize parses
@@ -58,7 +67,7 @@ func scanSheets(f *excelize.File) (scans map[string]sheetScan, readOnlyReason st
 // scanSheet streams one worksheet's XML. It fails if the XML isn't
 // well-formed.
 func scanSheet(data []byte) (sheetScan, error) {
-	s := sheetScan{masters: map[string]string{}}
+	s := sheetScan{masters: map[string]string{}, masterGroup: map[string]string{}, groups: map[string][]string{}}
 	d := xml.NewDecoder(bytes.NewReader(data))
 	row, col := 0, 0 // current cell, 1-based; cells may omit their r attribute
 	cell := ""
@@ -90,9 +99,24 @@ func scanSheet(data []byte) (sheetScan, error) {
 			}
 			cell = CellName(row-1, col-1) // "" if out of range
 		case "f":
-			if attr(el, "t") == "shared" {
-				if ref := attr(el, "ref"); ref != "" && cell != "" {
+			ref := attr(el, "ref")
+			switch attr(el, "t") {
+			case "shared":
+				si := attr(el, "si")
+				switch {
+				case cell == "":
+				case ref != "":
 					s.masters[cell] = ref
+					s.masterGroup[cell] = si
+				default:
+					s.groups[si] = append(s.groups[si], cell)
+				}
+			case "array", "dataTable":
+				if ref == "" {
+					ref = cell
+				}
+				if ref != "" {
+					s.locked = append(s.locked, ref)
 				}
 			}
 		}
